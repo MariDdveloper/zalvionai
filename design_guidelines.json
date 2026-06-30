@@ -1,0 +1,97 @@
+{
+  "project_name": "Claus IA",
+  "theme": "light",
+  "archetype": "Archetype 1 (Organic & Earthy)",
+  "emotional_tone": "Warm, intelligent, sophisticated, calm, and highly capable.",
+  "design_philosophy": "A modern, Claude-identical interface using warm, organic tones instead of sterile tech blues. Blends elegant serif typography for welcoming moments with highly legible sans-serif for reading dense AI outputs. Focuses on breathing room, subtle neumorphic layering, and tactile elements.",
+  "colors": {
+    "background_main": "#FDFDF9",
+    "background_sidebar": "#F3F2EC",
+    "background_accent": "#FDF8F5",
+    "primary": "#D97251",
+    "primary_hover": "#C05F41",
+    "text_primary": "#2D2A26",
+    "text_secondary": "#5C5954",
+    "border_subtle": "#EBE8E0",
+    "surface_glass": "rgba(253, 253, 249, 0.8)",
+    "error": "#B04646",
+    "success": "#4A7C59"
+  },
+  "typography": {
+    "fonts": {
+      "headings": "EB Garamond",
+      "body": "Figtree",
+      "mono": "JetBrains Mono"
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl tracking-tight leading-tight",
+      "h2": "text-3xl sm:text-4xl tracking-tight leading-snug",
+      "h3": "text-xl sm:text-2xl leading-snug",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm text-secondary tracking-wide"
+    }
+  },
+  "layout": {
+    "spacing_scale": "Generous spacing. Use p-6, p-8, and p-12 for containers. The chat bubbles must have p-4 to p-6.",
+    "grid_strategy": "Control Room Grid for the main layout (sidebar fixed on left taking 260px, main chat taking the rest). Sidebar must be fully collapsible on mobile. Mobile-first strategy.",
+    "surface_strategies": {
+      "sidebar": "Flat solid background with a sharp 1px right border (border-border_subtle). No shadow.",
+      "chat_composer": "Floating neumorphic pill centered at bottom. Soft shadow-lg, 1px border-border_subtle. Must expand dynamically as user types.",
+      "modals": "Crystal glassmorphism for overlays (backdrop-blur-xl bg-black/40), inner modal is flat solid #FDFDF9 with subtle rounded corners (rounded-2xl)."
+    }
+  },
+  "components": {
+    "icons": {
+      "library": "lucide-react",
+      "instructions": "Use lucide-react for all UI icons. Keep stroke width at 1.5 for a delicate, refined look."
+    },
+    "buttons": {
+      "primary": "Solid primary color, text-white, rounded-full or rounded-xl, subtle scale down on active.",
+      "secondary": "Ghost/Outline, border-border_subtle text-text_primary, hover:bg-black/5.",
+      "chat_action": "Small circular icon buttons with hover:bg-black/5 transition for attachments and voice input."
+    },
+    "auth_screens": {
+      "layout": "Split layout or centered elegant card. Left side/background uses minimalist texture. Right side has Google OAuth and Email OTP input fields.",
+      "typography": "Welcome greeting must use the serif heading font (EB Garamond) at text-4xl."
+    },
+    "chat_interface": {
+      "messages": "User messages: aligned right, soft gray background (bg-black/5), rounded-2xl. Assistant messages: aligned left, no background, pure text with markdown support and code blocks.",
+      "empty_state": "Centered on screen. Large elegant serif greeting ('How can I help you today?'). Suggested prompts below in outline chips.",
+      "input_area": "Bottom fixed. Contains model selector (Claus 3.5 Sonnet, etc.), attachment icon, voice input (microphone) icon, text area, send button."
+    }
+  },
+  "accessibility": {
+    "contrast": "Ensure all text meets APCA/WCAG AA contrast ratios against the warm backgrounds.",
+    "motion": "Respect prefers-reduced-motion. Use gentle ease-in-out transitions for sidebar toggle and chat message pop-ins.",
+    "data_testid_conventions": {
+      "login_google": "data-testid=\"login-google-button\"",
+      "login_email": "data-testid=\"login-email-button\"",
+      "otp_input": "data-testid=\"otp-input-field\"",
+      "chat_input": "data-testid=\"chat-composer-input\"",
+      "chat_send": "data-testid=\"chat-send-button\"",
+      "voice_input": "data-testid=\"voice-input-button\"",
+      "new_chat": "data-testid=\"new-chat-button\"",
+      "download_app": "data-testid=\"download-app-button\""
+    }
+  },
+  "media": {
+    "image_urls": [
+      {
+        "url": "https://images.pexels.com/photos/5506215/pexels-photo-5506215.jpeg",
+        "category": "auth_background",
+        "description": "Minimalist warm sand texture for the login screen background to evoke calm and premium organic feel."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1756294205934-88c44f9b84b1",
+        "category": "logo_abstract",
+        "description": "Abstract elegant shape to be used as a decorative element or placeholder app icon."
+      },
+      {
+        "url": "https://images.pexels.com/photos/3747070/pexels-photo-3747070.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "category": "desktop_app_promo",
+        "description": "Modern laptop desk visual for the 'Download Desktop App' section modal/page."
+      }
+    ],
+    "instructions_to_main_agent": "Use ONLY these provided images. Do not use generic placeholders. Implement the UI mimicking the sophisticated nature of Claude using the Organic & Earthy archetype colors. Ensure voice input UI, 15-language selector, Google + OTP auth flow, and desktop download options are built as requested."
+  }
+}
