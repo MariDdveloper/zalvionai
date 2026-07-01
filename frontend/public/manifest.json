@@ -1,0 +1,15 @@
+{
+  "short_name": "Claus IA",
+  "name": "Claus IA — Your Perfect AI",
+  "description": "Chat, reason, search the web, and generate images with Claus IA in 15 languages.",
+  "icons": [
+    { "src": "icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any maskable" },
+    { "src": "icon-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any maskable" }
+  ],
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "theme_color": "#D97251",
+  "background_color": "#FDFDF9"
+}
