@@ -437,13 +437,24 @@ class VideoBody(BaseModel):
     content: str = ""
     size: str = "1280x720"
     duration: int = 4
+    image: Optional[str] = None   # base64 (no data: prefix) for image-to-video
     language: str = "en"
 
 
-async def run_video_job(chat_id, asst_id, video_id, prompt, size, duration):
+async def run_video_job(chat_id, asst_id, video_id, prompt, size, duration, image_b64=None):
+    image_path = None
     try:
         vg = OpenAIVideoGeneration(api_key=EMERGENT_LLM_KEY)
-        video_bytes = await asyncio.to_thread(vg.text_to_video, prompt, VIDEO_MODEL, size, duration, 600)
+        mime_type = "image/jpeg"
+        if image_b64:
+            mime_type = ImageContent.get_mime_type(image_b64)
+            ext = "png" if mime_type == "image/png" else "jpg"
+            image_path = f"/tmp/{video_id}.{ext}"
+            with open(image_path, "wb") as f:
+                f.write(base64.b64decode(image_b64))
+        video_bytes = await asyncio.to_thread(
+            vg.text_to_video, prompt, VIDEO_MODEL, size, duration, 600, image_path, mime_type,
+        )
         if not video_bytes:
             raise RuntimeError("No video bytes returned")
         b64 = base64.b64encode(video_bytes).decode()
@@ -462,6 +473,12 @@ async def run_video_job(chat_id, asst_id, video_id, prompt, size, duration):
                       "messages.$[m].content": "Video generation failed. Please try again."}},
             array_filters=[{"m.id": asst_id}],
         )
+    finally:
+        if image_path and os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
 
 
 @api_router.post("/chats/{chat_id}/video")
@@ -473,8 +490,9 @@ async def create_video(chat_id: str, body: VideoBody, user: User = Depends(get_c
         body.size = "1280x720"
     if body.duration not in OpenAIVideoGeneration.DURATIONS:
         body.duration = 4
+    attachments = [{"kind": "image"}] if body.image else []
     user_msg = {"id": uuid.uuid4().hex, "role": "user", "type": "text",
-                "content": body.content, "attachments": [], "created_at": now_utc().isoformat()}
+                "content": body.content, "attachments": attachments, "created_at": now_utc().isoformat()}
     asst_id = uuid.uuid4().hex
     video_id = uuid.uuid4().hex
     assistant_msg = {"id": asst_id, "role": "assistant", "type": "video", "status": "generating",
@@ -489,7 +507,7 @@ async def create_video(chat_id: str, body: VideoBody, user: User = Depends(get_c
     )
     asyncio.create_task(run_video_job(
         chat_id, asst_id, video_id,
-        body.content or "A short cinematic video", body.size, body.duration,
+        body.content or "A short cinematic video", body.size, body.duration, body.image,
     ))
     return {"assistant_id": asst_id, "title": new_title}
 

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { ArrowUp, Paperclip, Mic, Globe, ImagePlus, X, Square, FileText, Film } from "lucide-react";
+import { ArrowUp, Paperclip, Mic, Globe, ImagePlus, X, Square, FileText, Film, RectangleHorizontal, RectangleVertical } from "lucide-react";
 import { toast } from "sonner";
 import { LANGUAGES } from "../lib/i18n";
 
@@ -7,6 +7,8 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
   const [text, setText] = useState("");
   const [imageMode, setImageMode] = useState(false);
   const [videoMode, setVideoMode] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(4);
+  const [videoOrientation, setVideoOrientation] = useState("landscape");
   const [attachments, setAttachments] = useState([]); // {name, kind, b64, text, preview}
   const [listening, setListening] = useState(false);
   const taRef = useRef(null);
@@ -37,12 +39,16 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
     if (!text.trim() && attachments.length === 0) return;
     const images = attachments.filter((a) => a.kind === "image").map((a) => a.b64);
     const fileTexts = attachments.filter((a) => a.kind === "file").map((a) => ({ name: a.name, text: a.text }));
+    const ORIENT = { landscape: "1280x720", portrait: "1024x1792", square: "1024x1024" };
     onSend({
       content: text.trim(),
       images,
       files: fileTexts,
       mode: videoMode ? "video" : imageMode ? "image" : "chat",
       web,
+      duration: videoDuration,
+      size: ORIENT[videoOrientation],
+      image: images[0] || null,
       attachmentsMeta: attachments.map((a) => ({ name: a.name, kind: a.kind })),
     });
     setText("");
@@ -95,6 +101,35 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
           placeholder={videoMode ? t.video + "…" : imageMode ? t.image + "…" : t.placeholder}
           className="w-full resize-none outline-none bg-transparent px-2 text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/70 max-h-[200px]"
         />
+        {videoMode && (
+          <div className="flex flex-wrap items-center gap-2 mt-2 px-1" data-testid="video-options">
+            <div className="flex items-center gap-1 bg-black/[0.04] rounded-full p-0.5">
+              {[4, 8, 12].map((d) => (
+                <button key={d} data-testid={`video-duration-${d}`} onClick={() => setVideoDuration(d)}
+                  className={`text-xs px-2.5 py-1 rounded-full transition-colors ${videoDuration === d ? "bg-white shadow-sm text-[var(--primary)] font-medium" : "text-[var(--text-secondary)]"}`}>
+                  {d}s
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1 bg-black/[0.04] rounded-full p-0.5">
+              <button data-testid="video-orient-landscape" onClick={() => setVideoOrientation("landscape")} title="16:9"
+                className={`p-1.5 rounded-full transition-colors ${videoOrientation === "landscape" ? "bg-white shadow-sm text-[var(--primary)]" : "text-[var(--text-secondary)]"}`}>
+                <RectangleHorizontal size={15} />
+              </button>
+              <button data-testid="video-orient-portrait" onClick={() => setVideoOrientation("portrait")} title="9:16"
+                className={`p-1.5 rounded-full transition-colors ${videoOrientation === "portrait" ? "bg-white shadow-sm text-[var(--primary)]" : "text-[var(--text-secondary)]"}`}>
+                <RectangleVertical size={15} />
+              </button>
+              <button data-testid="video-orient-square" onClick={() => setVideoOrientation("square")} title="1:1"
+                className={`p-1.5 rounded-full transition-colors ${videoOrientation === "square" ? "bg-white shadow-sm text-[var(--primary)]" : "text-[var(--text-secondary)]"}`}>
+                <Square size={15} />
+              </button>
+            </div>
+            {attachments.some((a) => a.kind === "image") && (
+              <span className="text-xs text-[var(--primary)] flex items-center gap-1"><ImagePlus size={13} /> image → video</span>
+            )}
+          </div>
+        )}
         <div className="flex items-center justify-between mt-1.5">
           <div className="flex items-center gap-1">
             <label data-testid="attach-button" className="p-2 rounded-full hover:bg-black/[0.05] cursor-pointer transition-colors" title={t.attach}>

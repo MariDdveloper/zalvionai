@@ -63,6 +63,8 @@ function MessageItem({ message, isStreaming }) {
             <img src={message.image_url} alt="generated" className="rounded-2xl max-w-md w-full border border-[var(--border-subtle)] shadow-sm" />
             {message.content && <p className="text-sm text-[var(--text-secondary)] mt-2">{message.content}</p>}
           </div>
+        ) : message.type === "video" ? (
+          <VideoBlock message={message} />
         ) : (
           <div className={`prose-claus max-w-none ${isStreaming ? "caret-blink" : ""}`}>
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>

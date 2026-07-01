@@ -78,7 +78,13 @@ export default function ChatApp() {
     }
     setBusy(true);
     try {
-      await apiPost(`/chats/${activeChatId}/video`, { content: payload.content, size: "1280x720", duration: 4, language: lang });
+      await apiPost(`/chats/${activeChatId}/video`, {
+        content: payload.content,
+        size: payload.size || "1280x720",
+        duration: payload.duration || 4,
+        image: payload.image || null,
+        language: lang,
+      });
       const d = await apiGet(`/chats/${activeChatId}/messages`);
       setMessages(d.messages || []);
       loadChats();
