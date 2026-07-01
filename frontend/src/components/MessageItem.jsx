@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { Copy, Check, FileText, Image as ImageIcon, Loader2, Film } from "lucide-react";
+import { Copy, Check, FileText, Image as ImageIcon, Loader2, Film, RefreshCw } from "lucide-react";
 import { API } from "../lib/api";
 
 function CodeBlock({ inline, className, children }) {
@@ -27,7 +27,7 @@ function CodeBlock({ inline, className, children }) {
   );
 }
 
-function MessageItem({ message, isStreaming }) {
+function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, t }) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -73,10 +73,18 @@ function MessageItem({ message, isStreaming }) {
           </div>
         )}
         {!isStreaming && message.type !== "image" && message.content && (
-          <button onClick={() => { navigator.clipboard.writeText(message.content); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
-            className="opacity-0 group-hover:opacity-100 transition-opacity mt-2 flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
-            {copied ? <Check size={13} /> : <Copy size={13} />}{copied ? "Copied" : "Copy"}
-          </button>
+          <div className="flex items-center gap-3 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button data-testid="copy-message-button" onClick={() => { navigator.clipboard.writeText(message.content); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+              className="flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
+              {copied ? <Check size={13} /> : <Copy size={13} />}{copied ? (t?.copied || "Copied") : (t?.copy || "Copy")}
+            </button>
+            {canRegenerate && message.type === "text" && (
+              <button data-testid="regenerate-button" onClick={onRegenerate}
+                className="flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--primary)]">
+                <RefreshCw size={13} /> {t?.regenerate || "Regenerate"}
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>

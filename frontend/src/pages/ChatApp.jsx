@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Menu, Sparkles } from "lucide-react";
 import { toast } from "sonner";
-import { apiGet, apiPost, apiDelete, streamChat } from "../lib/api";
+import { apiGet, apiPost, apiPatch, apiDelete, streamChat, streamRegenerate } from "../lib/api";
 import { getT } from "../lib/i18n";
 import Sidebar from "../components/Sidebar";
 import Composer from "../components/Composer";
@@ -15,6 +15,7 @@ export default function ChatApp() {
   const [lang, setLang] = useState(localStorage.getItem("claus_lang") || "it");
   const t = getT(lang);
   const [chats, setChats] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
   const [web, setWeb] = useState(true);
@@ -29,7 +30,12 @@ export default function ChatApp() {
     setChats(data);
   }, []);
 
-  useEffect(() => { loadChats(); }, [loadChats]);
+  const loadFolders = useCallback(async () => {
+    const data = await apiGet("/folders").catch(() => []);
+    setFolders(data);
+  }, []);
+
+  useEffect(() => { loadChats(); loadFolders(); }, [loadChats, loadFolders]);
 
   useEffect(() => {
     if (!chatId) { setMessages([]); return; }
@@ -66,6 +72,36 @@ export default function ChatApp() {
     await apiDelete(`/chats/${id}`);
     setChats((p) => p.filter((c) => c.chat_id !== id));
     if (id === chatId) { setMessages([]); navigate("/"); }
+  };
+
+  const renameChat = async (id, title) => {
+    if (!title.trim()) return;
+    setChats((p) => p.map((c) => c.chat_id === id ? { ...c, title } : c));
+    await apiPatch(`/chats/${id}`, { title }).catch((e) => toast.error(e.message));
+  };
+
+  const moveChat = async (id, folderId) => {
+    setChats((p) => p.map((c) => c.chat_id === id ? { ...c, folder_id: folderId } : c));
+    await apiPatch(`/chats/${id}`, folderId === null ? { clear_folder: true } : { folder_id: folderId }).catch((e) => toast.error(e.message));
+  };
+
+  const createFolder = async (name) => {
+    try {
+      const f = await apiPost("/folders", { name });
+      setFolders((p) => [...p, f]);
+      return f;
+    } catch (e) { toast.error(e.message); }
+  };
+
+  const renameFolder = async (id, name) => {
+    setFolders((p) => p.map((f) => f.folder_id === id ? { ...f, name } : f));
+    await apiPatch(`/folders/${id}`, { name }).catch((e) => toast.error(e.message));
+  };
+
+  const deleteFolder = async (id) => {
+    await apiDelete(`/folders/${id}`);
+    setFolders((p) => p.filter((f) => f.folder_id !== id));
+    setChats((p) => p.map((c) => c.folder_id === id ? { ...c, folder_id: null } : c));
   };
 
   const handleVideo = async (payload) => {
@@ -138,22 +174,51 @@ export default function ChatApp() {
     });
   };
 
+  const handleRegenerate = async () => {
+    if (!chatId || busy) return;
+    let base = messages;
+    if (base.length && base[base.length - 1].role === "assistant") base = base.slice(0, -1);
+    const asstId = "a" + Date.now();
+    setMessages([...base, { id: asstId, role: "assistant", type: "text", content: "" }]);
+    setBusy(true);
+    setStreamingId(asstId);
+    controllerRef.current = streamRegenerate(chatId, { web, language: lang }, {
+      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
+      onDone: () => { setBusy(false); setStreamingId(null); loadChats(); },
+      onError: () => {
+        setBusy(false); setStreamingId(null);
+        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error. Please try again." } : m));
+      },
+    });
+  };
+
   const stop = () => { controllerRef.current?.abort(); setBusy(false); setStreamingId(null); };
 
   const empty = messages.length === 0;
+  const lastAssistantId = [...messages].reverse().find((m) => m.role === "assistant" && m.type === "text")?.id;
+
+  const sidebarProps = {
+    chats, folders, activeId: chatId, onNew: newChat, onDelete: deleteChat,
+    onRename: renameChat, onMove: moveChat, onNewFolder: createFolder,
+    onRenameFolder: renameFolder, onDeleteFolder: deleteFolder,
+    lang, onLang: setLanguage, t, onDownload: () => setShowDownload(true),
+  };
 
   return (
     <div className="h-screen w-screen flex overflow-hidden bg-[var(--bg-main)]">
       {/* Sidebar desktop */}
       <div className="hidden lg:block flex-shrink-0">
-        <Sidebar chats={chats} activeId={chatId} onNew={newChat} onSelect={(id) => navigate(`/c/${id}`)}
-          onDelete={deleteChat} onClose={() => {}} lang={lang} onLang={setLanguage} t={t} onDownload={() => setShowDownload(true)} />
+        <Sidebar {...sidebarProps} onSelect={(id) => navigate(`/c/${id}`)} onClose={() => {}} />
       </div>
       {/* Sidebar mobile */}
       {sidebarOpen && (
         <div className="lg:hidden fixed inset-0 z-50 flex">
-          <div className="flex-shrink-0"><Sidebar chats={chats} activeId={chatId} onNew={newChat} onSelect={(id) => { navigate(`/c/${id}`); setSidebarOpen(false); }}
-            onDelete={deleteChat} onClose={() => setSidebarOpen(false)} lang={lang} onLang={setLanguage} t={t} onDownload={() => { setShowDownload(true); setSidebarOpen(false); }} /></div>
+          <div className="flex-shrink-0">
+            <Sidebar {...sidebarProps}
+              onSelect={(id) => { navigate(`/c/${id}`); setSidebarOpen(false); }}
+              onClose={() => setSidebarOpen(false)}
+              onDownload={() => { setShowDownload(true); setSidebarOpen(false); }} />
+          </div>
           <div className="flex-1 bg-black/30" onClick={() => setSidebarOpen(false)} />
         </div>
       )}
@@ -187,7 +252,10 @@ export default function ChatApp() {
             <div ref={scrollRef} className="flex-1 overflow-y-auto" data-testid="messages-container">
               <div className="max-w-3xl mx-auto px-4 py-8 space-y-7">
                 {messages.map((m) => (
-                  <MessageItem key={m.id} message={m} isStreaming={streamingId === m.id && !m.content && m.type !== "image"} />
+                  <MessageItem key={m.id} message={m}
+                    isStreaming={streamingId === m.id && !m.content && m.type !== "image"}
+                    canRegenerate={!busy && m.id === lastAssistantId}
+                    onRegenerate={handleRegenerate} t={t} />
                 ))}
                 {streamingId && messages.find((m) => m.id === streamingId)?.content === "" && messages.find((m) => m.id === streamingId)?.type !== "image" && (
                   <div className="flex gap-4">

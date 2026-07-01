@@ -1,0 +1,54 @@
+{
+  "summary": "Verified 3 new features (regenerate, rename chat, folders + move) plus chat regression via backend pytest (6/6) and Playwright UI E2E (7/7). All flows work end-to-end and persist server-side.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_chat_features.py",
+    "/app/test_reports/pytest/chat_features_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Sidebar.jsx has no data-testid for the chat action menu container itself (the pop-over uses inline z-50), and the outside-click overlay uses z-40 which is fine but relies on stopPropagation on menu items — considered clean.",
+    "renameChat in ChatApp.jsx does optimistic update but does NOT revert on API failure (silently only toasts). Low priority — the PATCH endpoint tested green.",
+    "handleRegenerate depends on `messages` closure without adding it to a useCallback dep list (it isn't a useCallback though, just a function each render, so OK); regenerate correctly strips trailing assistant before sending — server also strips trailing assistant, so no duplication observed.",
+    "Consider adding data-testid on the composer's mode/web toggles' pressed state, and on the chat action-menu popup container for future test resiliency."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_chat_features.py"
+  ],
+  "success_rate": {
+    "backend": "100% (6/6)",
+    "frontend": "100% (7/7)"
+  },
+  "test_credentials": "localStorage claus_token=test_session_qa_01 (user_testqa01, qa@claus.test). Same as Bearer token for API.",
+  "seed_data_creation": "Tests create TEST_-prefixed folders and transient chats; each cleans up its own resources via DELETE. Pre-existing folder 'Lavoro' and QA chats left intact.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend base URL and Bearer token verified working. Regenerate endpoint POST /api/chats/{id}/regenerate correctly deletes the trailing assistant message before streaming a new one — count stays 1 user + 1 assistant. Folder PATCH accepts either {folder_id: X} or {clear_folder: true}. UI test flow: inject localStorage.claus_token BEFORE page.goto, then navigate again to trigger auth. All new-feature data-testids listed in the review request are present and clickable.",
+  "detailed_results": {
+    "backend_pytest": {
+      "TestFolders::test_list_folders": "PASS",
+      "TestFolders::test_folder_create_rename_delete": "PASS",
+      "TestChatPatch::test_rename_chat_persists": "PASS",
+      "TestChatPatch::test_move_chat_in_and_out_of_folder": "PASS",
+      "TestChatPatch::test_delete_folder_ungroups_chats": "PASS",
+      "TestRegenerate::test_regenerate_does_not_duplicate_assistant": "PASS (1 user + 1 assistant after regenerate; assistant id changed)"
+    },
+    "frontend_playwright": {
+      "1_new_folder": "PASS — folder row appears with data-testid=folder-<id>",
+      "2_regenerate": "PASS — after regenerate the DOM still shows exactly 1 message-user + 1 message-assistant (no duplication)",
+      "3_rename_chat": "PASS — new title persisted in sidebar and returned by GET /api/chats",
+      "4_move_to_folder": "PASS — chat rendered nested inside folder-<id>; folder_id persisted server-side",
+      "5_delete_folder": "PASS — folder row removed, chat moves back to ungrouped 'CHAT' section",
+      "6_delete_chat_menu": "PASS — chat row disappears from sidebar",
+      "7_composer_regression": "PASS — attach-button, image-mode-toggle, video-mode-toggle, web-toggle, voice-input-button, chat-composer-input all render"
+    }
+  }
+}

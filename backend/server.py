@@ -273,6 +273,7 @@ async def create_chat(user: User = Depends(get_current_user)):
         "chat_id": f"chat_{uuid.uuid4().hex[:12]}",
         "user_id": user.user_id,
         "title": "New chat",
+        "folder_id": None,
         "messages": [],
         "created_at": now_utc().isoformat(),
         "updated_at": now_utc().isoformat(),
@@ -281,6 +282,72 @@ async def create_chat(user: User = Depends(get_current_user)):
     chat.pop("_id", None)
     chat.pop("messages", None)
     return chat
+
+
+class ChatUpdate(BaseModel):
+    title: Optional[str] = None
+    folder_id: Optional[str] = None
+    clear_folder: bool = False
+
+
+@api_router.patch("/chats/{chat_id}")
+async def update_chat(chat_id: str, body: ChatUpdate, user: User = Depends(get_current_user)):
+    update = {"updated_at": now_utc().isoformat()}
+    if body.title is not None:
+        update["title"] = body.title.strip()[:80] or "New chat"
+    if body.clear_folder:
+        update["folder_id"] = None
+    elif body.folder_id is not None:
+        update["folder_id"] = body.folder_id
+    res = await db.chats.update_one({"chat_id": chat_id, "user_id": user.user_id}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"status": "ok"}
+
+
+# ---------- Folders ----------
+class FolderBody(BaseModel):
+    name: str
+
+
+@api_router.get("/folders")
+async def list_folders(user: User = Depends(get_current_user)):
+    folders = await db.folders.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return folders
+
+
+@api_router.post("/folders")
+async def create_folder(body: FolderBody, user: User = Depends(get_current_user)):
+    folder = {
+        "folder_id": f"folder_{uuid.uuid4().hex[:12]}",
+        "user_id": user.user_id,
+        "name": (body.name.strip() or "New folder")[:60],
+        "created_at": now_utc().isoformat(),
+    }
+    await db.folders.insert_one(folder)
+    folder.pop("_id", None)
+    return folder
+
+
+@api_router.patch("/folders/{folder_id}")
+async def rename_folder(folder_id: str, body: FolderBody, user: User = Depends(get_current_user)):
+    res = await db.folders.update_one(
+        {"folder_id": folder_id, "user_id": user.user_id},
+        {"$set": {"name": (body.name.strip() or "New folder")[:60]}},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    return {"status": "ok"}
+
+
+@api_router.delete("/folders/{folder_id}")
+async def delete_folder(folder_id: str, user: User = Depends(get_current_user)):
+    await db.folders.delete_one({"folder_id": folder_id, "user_id": user.user_id})
+    await db.chats.update_many(
+        {"user_id": user.user_id, "folder_id": folder_id},
+        {"$set": {"folder_id": None}},
+    )
+    return {"status": "ok"}
 
 
 @api_router.get("/chats/{chat_id}/messages")
@@ -429,6 +496,96 @@ async def stream_chat(chat_id: str, body: ChatStreamBody, user: User = Depends(g
         yield f"data: {json.dumps({'type': 'done', 'title': new_title})}\n\n"
 
     return StreamingResponse(text_gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------- Regenerate last assistant response ----------
+class RegenBody(BaseModel):
+    web: bool = True
+    language: str = "en"
+
+
+def _build_initial(history, lang_name):
+    initial = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
+    for m in history:
+        if m["role"] == "user":
+            initial.append({"role": "user", "content": m.get("content", "") or "(image)"})
+        elif m["role"] == "assistant":
+            txt = m.get("content", "")
+            if m.get("type") == "image":
+                txt = "[generated an image]"
+            elif m.get("type") == "video":
+                txt = "[generated a video]"
+            initial.append({"role": "assistant", "content": txt or ""})
+    return initial
+
+
+@api_router.post("/chats/{chat_id}/regenerate")
+async def regenerate_chat(chat_id: str, body: RegenBody, user: User = Depends(get_current_user)):
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    messages = list(chat.get("messages", []))
+    if messages and messages[-1]["role"] == "assistant":
+        messages.pop()
+    if not messages or messages[-1]["role"] != "user":
+        raise HTTPException(status_code=400, detail="Nothing to regenerate")
+    await db.chats.update_one({"chat_id": chat_id}, {"$set": {"messages": messages}})
+
+    lang_name = LANG_NAMES.get(body.language, "English")
+    last_user = messages[-1]
+    initial = _build_initial(messages[:-1], lang_name)
+    user_message = UserMessage(text=last_user.get("content") or "(image)")
+
+    async def gen():
+        assistant_text = []
+
+        def build_chat(with_tools):
+            c = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=chat_id,
+                        system_message=SYSTEM_PROMPT.format(lang=lang_name),
+                        initial_messages=list(initial))
+            c.with_model(*TEXT_MODEL).with_params(max_tokens=8000)
+            if with_tools:
+                c.with_tools([{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}])
+            return c
+
+        produced = False
+        try:
+            c = build_chat(body.web)
+            async for ev in c.stream_message(user_message):
+                if isinstance(ev, TextDelta):
+                    produced = True
+                    assistant_text.append(ev.content)
+                    yield f"data: {json.dumps({'type': 'delta', 'content': ev.content})}\n\n"
+                elif isinstance(ev, StreamDone):
+                    break
+        except Exception as e:
+            logger.error(f"Regenerate error: {e}")
+            if not produced:
+                try:
+                    c2 = build_chat(False)
+                    async for ev in c2.stream_message(user_message):
+                        if isinstance(ev, TextDelta):
+                            assistant_text.append(ev.content)
+                            yield f"data: {json.dumps({'type': 'delta', 'content': ev.content})}\n\n"
+                        elif isinstance(ev, StreamDone):
+                            break
+                except Exception as e2:
+                    logger.error(f"Regenerate fallback error: {e2}")
+                    msg = "Sorry, something went wrong generating a response."
+                    assistant_text.append(msg)
+                    yield f"data: {json.dumps({'type': 'delta', 'content': msg})}\n\n"
+
+        full = "".join(assistant_text)
+        assistant_msg = {"id": uuid.uuid4().hex, "role": "assistant", "type": "text",
+                         "content": full, "created_at": now_utc().isoformat()}
+        await db.chats.update_one(
+            {"chat_id": chat_id},
+            {"$push": {"messages": assistant_msg}, "$set": {"updated_at": now_utc().isoformat()}},
+        )
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

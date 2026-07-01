@@ -26,16 +26,36 @@ export async function apiPost(path, body, extraHeaders = {}) {
   return data;
 }
 
+export async function apiPatch(path, body) {
+  const res = await fetch(`${API}${path}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: authHeaders(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || "Request failed");
+  return data;
+}
+
 export async function apiDelete(path) {
   const res = await fetch(`${API}${path}`, { method: "DELETE", credentials: "include", headers: authHeaders() });
   return res.json().catch(() => ({}));
 }
 
-export function streamChat(chatId, payload, { onDelta, onImage, onDone, onError }) {
+export function streamChat(chatId, payload, handlers) {
+  return streamSSE(`${API}/chats/${chatId}/stream`, payload, handlers);
+}
+
+export function streamRegenerate(chatId, payload, handlers) {
+  return streamSSE(`${API}/chats/${chatId}/regenerate`, payload, handlers);
+}
+
+function streamSSE(url, payload, { onDelta, onImage, onDone, onError }) {
   const controller = new AbortController();
   (async () => {
     try {
-      const res = await fetch(`${API}/chats/${chatId}/stream`, {
+      const res = await fetch(url, {
         method: "POST",
         credentials: "include",
         headers: authHeaders(),
