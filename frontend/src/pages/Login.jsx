@@ -24,6 +24,10 @@ export default function Login() {
   const googleLogin = () => {
     // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     const clientId = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    if (!clientId) {
+      toast.error("Google login non configurato (client ID mancante).");
+      return;
+    }
     const redirectUri = window.location.origin + "/auth/google";
     const params = new URLSearchParams({
       client_id: clientId,
