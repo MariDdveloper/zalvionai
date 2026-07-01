@@ -1,0 +1,42 @@
+{
+  "summary": "Verified Google OAuth 403 fix. Backend POST /api/auth/google returns 401 gracefully on invalid code. Callback shows helpful data-testid='google-callback-message' for access_denied (mentions 403 + publish/test user) and generic 'Sign-in failed, redirecting…' for invalid code, then redirects to /login. Email OTP regression PASS. CRITICAL DISCOVERY: main agent's assumption that the 403 is a Google-side 'Testing mode' issue is likely WRONG — the running frontend was sending client_id=undefined because it had not been restarted after REACT_APP_GOOGLE_CLIENT_ID was set in frontend/.env. After I restarted the frontend, the Google URL now contains the real client_id. This is very likely the root cause of the user's 403.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Google OAuth initiation (BEFORE my restart)",
+        "issue": "Frontend served client_id=undefined in the Google authorization URL (env var REACT_APP_GOOGLE_CLIENT_ID was in /app/frontend/.env but the running CRA process had been started before it was added / hadn't been reloaded). This causes Google to reject the request (invalid_request → often surfaced as HTTP 400/403 in the browser) which perfectly matches the user's 'Error 403' report. Restarting the frontend fixed the URL to include the real client_id. This is the most probable ACTUAL root cause of the user report — not the 'OAuth consent screen Testing mode' theory.",
+        "affected_selectors": ["[data-testid='login-google-button']"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_google_auth.py",
+    "/app/test_reports/pytest/google_auth_results.xml"
+  ],
+  "action_items": [
+    "IMPORTANT: The 'Error 403' the user reported is very likely NOT the Google Cloud Console 'Testing mode' issue as previously diagnosed. It was almost certainly caused by REACT_APP_GOOGLE_CLIENT_ID not being loaded by the running frontend process (client_id=undefined in the outgoing Google URL). I restarted the frontend and the URL is now correct. Please confirm with the user whether the 403 is gone after this restart.",
+    "Consider adding a guard in Login.jsx: if !clientId, show an actionable error toast ('OAuth client not configured') instead of navigating to Google with client_id=undefined.",
+    "OPTIONAL: The graceful access_denied message is currently English only; consider localising it via getT(lang) like the rest of the page."
+  ],
+  "critical_code_review_comments": [
+    "Login.jsx googleLogin() has no fallback/guard when REACT_APP_GOOGLE_CLIENT_ID is undefined — silently sends 'undefined' as client_id. Add: if (!clientId) { toast.error('Google login not configured'); return; }",
+    "GoogleCallback.jsx: fixed message text is English; app is Italian-first. Consider using getT(lang).",
+    "Backend /api/auth/google correctly returns 401 with generic detail — good, no 500 leaks; error is logged server-side."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_google_auth.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100% (all 4 UI scenarios pass after frontend restart)"},
+  "test_credentials": "Not needed — Google auth tests do not require a real login. QA session (test_session_qa_01) not used.",
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All 5 requested checks pass: (1) Google URL built correctly with client_id, redirect_uri=/auth/google, response_type=code, scope=openid email profile; (2) /auth/google?error=access_denied shows the 403/publish/test-user message via data-testid=google-callback-message and redirects to /login in ~2.6s; (3) /auth/google?code=fakecode123 shows 'Sign-in failed, redirecting…' and redirects to /login (~2s); (4) POST /api/auth/google with fake code returns HTTP 401 detail='Google authentication failed'; (5) Email OTP flow still works — email button reveals data-testid=login-email-input. IMPORTANT gotcha for next agent: frontend must be restarted after any change to /app/frontend/.env (REACT_APP_*), otherwise CRA serves stale env values.",
+  "rca of the issue": "RCA of the reported 403: The frontend process was serving a JS bundle where process.env.REACT_APP_GOOGLE_CLIENT_ID resolved to undefined, so window.location.href became https://accounts.google.com/o/oauth2/v2/auth?client_id=undefined&... — Google's OAuth endpoint rejects such requests and the browser/user sees an error (commonly '403 access blocked' / 'Error 400: invalid_request'). Reproduction (pre-fix): opened /login in Chromium with route interception, clicked data-testid='login-google-button', captured navigation URL → literally 'client_id=undefined'. Mitigation applied: sudo supervisorctl restart frontend → CRA re-read /app/frontend/.env → URL now contains the real client_id (411367328532-e5bfa20v...apps.googleusercontent.com). Recommended permanent fix: add a client-side guard in Login.jsx googleLogin() so a missing client_id fails loudly instead of silently forwarding 'undefined' to Google."
+}
