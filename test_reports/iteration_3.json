@@ -1,0 +1,50 @@
+{
+  "summary": "Verified fix for Google 403 by switching to Emergent-managed OAuth. Backend pytest 4/4 PASS on new /api/auth/google/session (missing header 400, invalid session 401, never 500) + legacy safe. UI Playwright 4/4 PASS: Google button navigates to https://auth.emergentagent.com/?redirect=<origin>/ (no accounts.google.com), fake session_id callback redirects to /login without blank crash, email OTP path intact, authenticated ChatApp still renders with sidebar+composer via QA token.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_google_session.py",
+    "/app/test_reports/pytest/google_session_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "test_credentials.md still says 'Google login: DIRECT Google OAuth 2.0 (accounts.google.com)' — outdated after the switch to Emergent-managed OAuth. Recommend updating docs to note login now goes to auth.emergentagent.com.",
+    "Legacy /api/auth/google endpoint and GoogleCallback.jsx / /auth/google route still exist (harmless). Consider removing to reduce attack surface and confusion.",
+    "AuthCallback.jsx swallows all errors with an empty catch — fine for redirect UX, but a toast('Google login failed') would be a nicer signal for the user before navigating to /login.",
+    "AuthContext.checkAuth() runs even when a Bearer token exists in localStorage but no session_id hash — that's correct; just noting that when /auth/me returns 401 the app immediately shows /login, which is expected."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_google_session.py"
+  ],
+  "success_rate": {
+    "backend": "100% (4/4)",
+    "frontend": "100% (4/4)"
+  },
+  "test_credentials": "QA token: localStorage.setItem('claus_token','test_session_qa_01') → user_testqa01 / qa@claus.test. Verified working.",
+  "seed_data_creation": "None. Existing QA user & session already seeded from prior iterations.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Google login now goes through Emergent-managed OAuth (https://auth.emergentagent.com/?redirect=<origin>/). Backend endpoint is POST /api/auth/google/session with header X-Session-ID; returns 400 without header, 401 for invalid session (calls demobackend.emergentagent.com/auth/v1/env/oauth/session-data). Playwright cannot complete a real Google login (no real Google account), so verification is limited to (a) intercepting the click's navigation target and (b) verifying the callback flow gracefully handles an invalid session_id. Legacy /api/auth/google direct-OAuth endpoint still present but unused.",
+  "detailed_results": {
+    "backend_pytest": {
+      "TestGoogleSession::test_missing_header_returns_400": "PASS (400 detail contains 'session')",
+      "TestGoogleSession::test_invalid_session_returns_401": "PASS (401 detail == 'Google authentication failed')",
+      "TestGoogleSession::test_invalid_session_never_500": "PASS (empty / short / 500-char / special-char session ids all → 400 or 401, never 500)",
+      "TestLegacyGoogleAuth::test_legacy_bad_code_returns_401": "PASS (legacy /api/auth/google still returns 401 gracefully)"
+    },
+    "frontend_playwright": {
+      "1_google_button_target": "PASS — navigation request captured: https://auth.emergentagent.com/?redirect=https%3A%2F%2Fclaus-ai.preview.emergentagent.com%2F ; no accounts.google.com hit",
+      "2_email_otp_regression": "PASS — login-email-button opens step with login-email-input + send-code-button",
+      "3_authcallback_fake_session": "PASS — navigating to /#session_id=fakesession123 → POST /api/auth/google/session 401 → redirect to /login → login-google-button visible (no blank screen)",
+      "4_authenticated_chatapp": "PASS — with localStorage claus_token=test_session_qa_01, ChatApp renders new-chat-button, chat-composer-input, image-mode-toggle, video-mode-toggle, web-toggle, voice-input-button"
+    }
+  },
+  "rca of the issue": "Root cause of original Google 403 (from iteration 1): direct OAuth 2.0 client in a non-verified Google Cloud project only permits test users listed in the consent screen; other Google accounts (including QA agents) receive 'Non disponi dell'autorizzazione'. Fix applied by main agent: replaced direct OAuth with Emergent-managed OAuth (auth.emergentagent.com → demobackend.emergentagent.com/auth/v1/env/oauth/session-data). This uses a pre-verified OAuth app so any Google user can sign in without any Google Cloud config. Verified: (1) button now targets auth.emergentagent.com, (2) backend /api/auth/google/session accepts X-Session-ID and calls Emergent session-data endpoint, (3) fake session id → 401 → clean redirect to /login."
+}

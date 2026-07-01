@@ -246,6 +246,36 @@ async def google_auth(body: GoogleAuthBody, response: Response):
     return {"user": user.model_dump(), "token": token}
 
 
+# ---------- Auth: Google via Emergent (verified OAuth, works on deploy, zero Google config) ----------
+@api_router.post("/auth/google/session")
+async def google_session(request: Request, response: Response):
+    session_id = request.headers.get("X-Session-ID")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session id")
+    try:
+        r = await asyncio.to_thread(
+            requests.get,
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": session_id}, timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.error(f"Emergent auth failed: {e}")
+        raise HTTPException(status_code=401, detail="Google authentication failed")
+    user = await upsert_user(data["email"], data.get("name", ""), data.get("picture"))
+    token = data.get("session_token") or await create_session(user.user_id)
+    await db.user_sessions.update_one(
+        {"session_token": token},
+        {"$set": {"user_id": user.user_id, "session_token": token,
+                  "expires_at": (now_utc() + timedelta(days=7)).isoformat(),
+                  "created_at": now_utc().isoformat()}},
+        upsert=True,
+    )
+    set_session_cookie(response, token)
+    return {"user": user.model_dump(), "token": token}
+
+
 @api_router.get("/auth/me")
 async def auth_me(user: User = Depends(get_current_user)):
     return user.model_dump()
