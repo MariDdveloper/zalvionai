@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from "react";
-import { ArrowUp, Paperclip, Mic, Globe, ImagePlus, X, Square, FileText } from "lucide-react";
+import { ArrowUp, Paperclip, Mic, Globe, ImagePlus, X, Square, FileText, Film } from "lucide-react";
 import { toast } from "sonner";
 import { LANGUAGES } from "../lib/i18n";
 
 export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang }) {
   const [text, setText] = useState("");
   const [imageMode, setImageMode] = useState(false);
+  const [videoMode, setVideoMode] = useState(false);
   const [attachments, setAttachments] = useState([]); // {name, kind, b64, text, preview}
   const [listening, setListening] = useState(false);
   const taRef = useRef(null);
@@ -40,7 +41,7 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
       content: text.trim(),
       images,
       files: fileTexts,
-      mode: imageMode ? "image" : "chat",
+      mode: videoMode ? "video" : imageMode ? "image" : "chat",
       web,
       attachmentsMeta: attachments.map((a) => ({ name: a.name, kind: a.kind })),
     });
@@ -91,7 +92,7 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={imageMode ? t.image + "…" : t.placeholder}
+          placeholder={videoMode ? t.video + "…" : imageMode ? t.image + "…" : t.placeholder}
           className="w-full resize-none outline-none bg-transparent px-2 text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/70 max-h-[200px]"
         />
         <div className="flex items-center justify-between mt-1.5">
@@ -100,9 +101,13 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
               <Paperclip size={18} strokeWidth={1.7} className="text-[var(--text-secondary)]" />
               <input type="file" multiple className="hidden" onChange={(e) => handleFiles(Array.from(e.target.files))} />
             </label>
-            <button data-testid="image-mode-toggle" onClick={() => setImageMode(!imageMode)} title={t.image}
+            <button data-testid="image-mode-toggle" onClick={() => { setImageMode(!imageMode); setVideoMode(false); }} title={t.image}
               className={`p-2 rounded-full transition-colors ${imageMode ? "bg-[var(--primary)]/15 text-[var(--primary)]" : "hover:bg-black/[0.05] text-[var(--text-secondary)]"}`}>
               <ImagePlus size={18} strokeWidth={1.7} />
+            </button>
+            <button data-testid="video-mode-toggle" onClick={() => { setVideoMode(!videoMode); setImageMode(false); }} title={t.video}
+              className={`p-2 rounded-full transition-colors ${videoMode ? "bg-[var(--primary)]/15 text-[var(--primary)]" : "hover:bg-black/[0.05] text-[var(--text-secondary)]"}`}>
+              <Film size={18} strokeWidth={1.7} />
             </button>
             <button data-testid="web-toggle" onClick={() => setWeb(!web)} title={t.web}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-sm transition-colors ${web ? "bg-[var(--primary)]/15 text-[var(--primary)]" : "hover:bg-black/[0.05] text-[var(--text-secondary)]"}`}>

@@ -20,6 +20,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
 
 from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent, TextDelta, StreamDone
+from emergentintegrations.llm.openai.video_generation import OpenAIVideoGeneration
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -32,6 +33,9 @@ EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
 SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'onboarding@resend.dev')
 resend.api_key = RESEND_API_KEY
+
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
 
 TEXT_MODEL = ("anthropic", "claude-sonnet-4-6")
 IMAGE_MODEL = ("gemini", "gemini-3.1-flash-image-preview")
@@ -199,32 +203,45 @@ async def verify_otp(body: OTPVerify, response: Response):
     return {"user": user.model_dump(), "token": token}
 
 
-# ---------- Auth: Google (Emergent) ----------
-@api_router.post("/auth/google/session")
-async def google_session(request: Request, response: Response):
-    session_id = request.headers.get("X-Session-ID")
-    if not session_id:
-        raise HTTPException(status_code=400, detail="Missing session id")
+# ---------- Auth: Google (direct OAuth 2.0) ----------
+class GoogleAuthBody(BaseModel):
+    code: str
+    redirect_uri: str
+
+
+@api_router.post("/auth/google")
+async def google_auth(body: GoogleAuthBody, response: Response):
+    # REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
     try:
-        r = await asyncio.to_thread(
-            requests.get,
-            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": session_id}, timeout=15,
+        token_res = await asyncio.to_thread(
+            requests.post, "https://oauth2.googleapis.com/token",
+            data={
+                "code": body.code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": body.redirect_uri,
+                "grant_type": "authorization_code",
+            }, timeout=15,
         )
-        r.raise_for_status()
-        data = r.json()
+        token_res.raise_for_status()
+        tokens = token_res.json()
+        access_token = tokens.get("access_token")
+        if not access_token:
+            raise RuntimeError(f"No access token in Google response: {tokens}")
+        info_res = await asyncio.to_thread(
+            requests.get, "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"}, timeout=15,
+        )
+        info_res.raise_for_status()
+        data = info_res.json()
     except Exception as e:
-        logger.error(f"Emergent auth failed: {e}")
+        logger.error(f"Google auth failed: {e}")
         raise HTTPException(status_code=401, detail="Google authentication failed")
-    user = await upsert_user(data["email"], data.get("name", ""), data.get("picture"))
-    token = data.get("session_token") or await create_session(user.user_id)
-    await db.user_sessions.update_one(
-        {"session_token": token},
-        {"$set": {"user_id": user.user_id, "session_token": token,
-                  "expires_at": (now_utc() + timedelta(days=7)).isoformat(),
-                  "created_at": now_utc().isoformat()}},
-        upsert=True,
-    )
+    email = data.get("email")
+    if not email:
+        raise HTTPException(status_code=401, detail="Could not read email from Google")
+    user = await upsert_user(email, data.get("name", ""), data.get("picture"))
+    token = await create_session(user.user_id)
     set_session_cookie(response, token)
     return {"user": user.model_dump(), "token": token}
 
@@ -415,6 +432,77 @@ async def stream_chat(chat_id: str, body: ChatStreamBody, user: User = Depends(g
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# ---------- Video generation (Sora 2) ----------
+class VideoBody(BaseModel):
+    content: str = ""
+    size: str = "1280x720"
+    duration: int = 4
+    language: str = "en"
+
+
+async def run_video_job(chat_id, asst_id, video_id, prompt, size, duration):
+    try:
+        vg = OpenAIVideoGeneration(api_key=EMERGENT_LLM_KEY)
+        video_bytes = await asyncio.to_thread(vg.text_to_video, prompt, VIDEO_MODEL, size, duration, 600)
+        if not video_bytes:
+            raise RuntimeError("No video bytes returned")
+        b64 = base64.b64encode(video_bytes).decode()
+        await db.videos.insert_one({"video_id": video_id, "data": b64, "created_at": now_utc().isoformat()})
+        await db.chats.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"messages.$[m].status": "done", "messages.$[m].video_id": video_id,
+                      "updated_at": now_utc().isoformat()}},
+            array_filters=[{"m.id": asst_id}],
+        )
+    except Exception as e:
+        logger.error(f"Video job error: {e}")
+        await db.chats.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"messages.$[m].status": "error",
+                      "messages.$[m].content": "Video generation failed. Please try again."}},
+            array_filters=[{"m.id": asst_id}],
+        )
+
+
+@api_router.post("/chats/{chat_id}/video")
+async def create_video(chat_id: str, body: VideoBody, user: User = Depends(get_current_user)):
+    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if body.size not in OpenAIVideoGeneration.SIZES:
+        body.size = "1280x720"
+    if body.duration not in OpenAIVideoGeneration.DURATIONS:
+        body.duration = 4
+    user_msg = {"id": uuid.uuid4().hex, "role": "user", "type": "text",
+                "content": body.content, "attachments": [], "created_at": now_utc().isoformat()}
+    asst_id = uuid.uuid4().hex
+    video_id = uuid.uuid4().hex
+    assistant_msg = {"id": asst_id, "role": "assistant", "type": "video", "status": "generating",
+                     "content": "", "video_id": "", "created_at": now_utc().isoformat()}
+    new_title = chat["title"]
+    if chat["title"] == "New chat" and body.content:
+        new_title = body.content[:48]
+    await db.chats.update_one(
+        {"chat_id": chat_id},
+        {"$push": {"messages": {"$each": [user_msg, assistant_msg]}},
+         "$set": {"updated_at": now_utc().isoformat(), "title": new_title}},
+    )
+    asyncio.create_task(run_video_job(
+        chat_id, asst_id, video_id,
+        body.content or "A short cinematic video", body.size, body.duration,
+    ))
+    return {"assistant_id": asst_id, "title": new_title}
+
+
+@api_router.get("/videos/{video_id}")
+async def get_video(video_id: str):
+    doc = await db.videos.find_one({"video_id": video_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Video not found")
+    data = base64.b64decode(doc["data"])
+    return Response(content=data, media_type="video/mp4")
+
+
 @api_router.get("/")
 async def root():
     return {"message": "Claus IA API"}
@@ -432,8 +520,5 @@ app.add_middleware(
 
 
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
-utdown")
 async def shutdown_db_client():
     client.close()

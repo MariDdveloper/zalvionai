@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Menu, Sparkles } from "lucide-react";
+import { toast } from "sonner";
 import { apiGet, apiPost, apiDelete, streamChat } from "../lib/api";
 import { getT } from "../lib/i18n";
 import Sidebar from "../components/Sidebar";
@@ -39,6 +40,18 @@ export default function ChatApp() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
+  // Poll while a video is generating
+  useEffect(() => {
+    if (!chatId) return;
+    const hasGenerating = messages.some((m) => m.type === "video" && m.status === "generating");
+    if (!hasGenerating) return;
+    const iv = setInterval(async () => {
+      const d = await apiGet(`/chats/${chatId}/messages`).catch(() => null);
+      if (d?.messages) setMessages(d.messages);
+    }, 5000);
+    return () => clearInterval(iv);
+  }, [messages, chatId]);
+
   const setLanguage = (c) => { setLang(c); localStorage.setItem("claus_lang", c); };
 
   const newChat = async () => {
@@ -55,7 +68,28 @@ export default function ChatApp() {
     if (id === chatId) { setMessages([]); navigate("/"); }
   };
 
+  const handleVideo = async (payload) => {
+    let activeChatId = chatId;
+    if (!activeChatId) {
+      const c = await apiPost("/chats");
+      setChats((p) => [c, ...p]);
+      activeChatId = c.chat_id;
+      navigate(`/c/${c.chat_id}`);
+    }
+    setBusy(true);
+    try {
+      await apiPost(`/chats/${activeChatId}/video`, { content: payload.content, size: "1280x720", duration: 4, language: lang });
+      const d = await apiGet(`/chats/${activeChatId}/messages`);
+      setMessages(d.messages || []);
+      loadChats();
+    } catch (e) {
+      toast.error(e.message || "Video generation error");
+    }
+    setBusy(false);
+  };
+
   const handleSend = async (payload) => {
+    if (payload.mode === "video") return handleVideo(payload);
     let activeChatId = chatId;
     if (!activeChatId) {
       const c = await apiPost("/chats");

@@ -20,9 +20,8 @@ export function AuthProvider({ children }) {
   }, []);
 
   useEffect(() => {
-    // CRITICAL: If returning from OAuth callback, skip the /me check.
-    // AuthCallback will exchange the session_id and establish the session first.
-    if (window.location.hash?.includes("session_id=")) {
+    // Direct Google OAuth callback handles its own auth; skip the /me check there.
+    if (window.location.pathname.startsWith("/auth/google")) {
       setLoading(false);
       return;
     }

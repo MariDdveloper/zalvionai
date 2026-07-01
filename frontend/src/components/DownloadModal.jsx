@@ -5,14 +5,15 @@ import { toast } from "sonner";
 const PROMO = "https://images.pexels.com/photos/3747070/pexels-photo-3747070.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940";
 
 export default function DownloadModal({ open, onClose, t }) {
-  const [deferred, setDeferred] = useState(null);
+  const [deferred, setDeferred] = useState(typeof window !== "undefined" ? window.__deferredInstallPrompt : null);
   const [installed, setInstalled] = useState(false);
 
   useEffect(() => {
-    const handler = (e) => { e.preventDefault(); setDeferred(e); };
+    const handler = (e) => { e.preventDefault(); window.__deferredInstallPrompt = e; setDeferred(e); };
     window.addEventListener("beforeinstallprompt", handler);
     window.addEventListener("appinstalled", () => setInstalled(true));
     if (window.matchMedia("(display-mode: standalone)").matches) setInstalled(true);
+    if (window.__deferredInstallPrompt) setDeferred(window.__deferredInstallPrompt);
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
 
@@ -20,13 +21,18 @@ export default function DownloadModal({ open, onClose, t }) {
 
   const install = async () => {
     if (installed) return toast.success(t.installed);
-    if (deferred) {
-      deferred.prompt();
-      const { outcome } = await deferred.userChoice;
+    const prompt = deferred || window.__deferredInstallPrompt;
+    if (prompt) {
+      prompt.prompt();
+      const { outcome } = await prompt.userChoice;
       if (outcome === "accepted") { setInstalled(true); toast.success(t.installed); }
+      window.__deferredInstallPrompt = null;
       setDeferred(null);
+    } else if (window.matchMedia("(display-mode: standalone)").matches) {
+      setInstalled(true);
+      toast.success(t.installed);
     } else {
-      toast.message("Use your browser menu → \"Install Claus IA\" to add it as a desktop app.");
+      toast.error("Install unavailable in this browser. Open Claus IA in Chrome or Edge on desktop to install the app.");
     }
   };
 
