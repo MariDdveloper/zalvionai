@@ -28,6 +28,15 @@ Build "Claus IA", a Claude-identical, more powerful AI web app (Italian user). C
 ## Known fragility note
 - Some search_replace edits to MessageItem.jsx and server.py were silently reverted once (video branch/endpoints), likely a visual-edits/hot-reload race. Re-applied and verified. If a feature "disappears", re-check the file on disk.
 
+### Iteration 3 (2026-07-01)
+- ✅ Google 403 root cause fixed: frontend served client_id=undefined because CRA hadn't reloaded after REACT_APP_GOOGLE_CLIENT_ID was added. Frontend restarted; guard added in Login.jsx; graceful access_denied handling in GoogleCallback. Verified by testing_agent (iteration_1, all pass).
+- ✅ Regenerate assistant message (POST /chats/{id}/regenerate — strips trailing assistant, re-streams, no duplication). Tested.
+- ✅ Rename chat (PATCH /chats/{id} {title}). Tested + persists.
+- ✅ Folders: create/rename/delete (/folders), move chats in/out (PATCH {folder_id}|{clear_folder}); sidebar grouping + chat action menu. Tested (backend 6/6, frontend 7/7).
+
+## Remaining 403 note (user-side Google Console)
+- If "Continua con Google" still shows 403 AFTER selecting the account, the OAuth consent screen is in "Testing" publishing status (or User type = Internal). Fix: Google Cloud Console → OAuth consent screen → PUBLISH APP (Production). Non-sensitive scopes (openid/email/profile) need no Google verification. Alternatively add the email under Test users. This is not a code issue.
+
 ## Verified (curl/screenshot)
 - Auth /auth/me (cookie + Bearer), chats create/list/persist, video endpoint message flow, full chat UI with image/video/web/voice toggles, sidebar, download, language selector, Italian login screen.
 
