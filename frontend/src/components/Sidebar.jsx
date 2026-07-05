@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   Plus, Search, Trash2, Download, LogOut, PanelLeftClose, MessageSquare,
-  MoreHorizontal, FolderPlus, Folder, ChevronDown, ChevronRight, Pencil, Check, X,
+  MoreHorizontal, FolderPlus, Folder, ChevronDown, ChevronRight, Pencil, Check, X, Sparkles,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import LanguageMenu from "./LanguageMenu";
@@ -9,6 +9,7 @@ import LanguageMenu from "./LanguageMenu";
 export default function Sidebar({
   chats, folders, activeId, onNew, onSelect, onDelete, onRename, onMove,
   onNewFolder, onRenameFolder, onDeleteFolder, onClose, lang, onLang, t, onDownload,
+  user, onUpgrade,
 }) {
   const { user, logout } = useAuth();
   const [q, setQ] = useState("");
@@ -187,6 +188,23 @@ export default function Sidebar({
       </div>
 
       <div className="border-t border-[var(--border-subtle)] p-3 space-y-2">
+        {user && (user.plan === "pro" ? (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--primary)]/10 text-[var(--primary)] text-sm font-medium" data-testid="sidebar-plan-badge">
+            <Sparkles size={15} /> Claus IA Pro
+          </div>
+        ) : (
+          <button data-testid="sidebar-upgrade-button" onClick={onUpgrade}
+            className="w-full text-left rounded-xl border border-[var(--primary)]/40 bg-[var(--bg-accent)] p-3 hover:border-[var(--primary)] transition-colors">
+            <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] mb-1.5">
+              <span>{Math.max(0, (user.usage_limit || 5) - (user.usage_used || 0))} {t.messagesLeft}</span>
+              <span>{user.usage_used || 0}/{user.usage_limit || 5}</span>
+            </div>
+            <div className="h-1.5 rounded-full bg-black/[0.06] overflow-hidden mb-2.5">
+              <div className="h-full bg-[var(--primary)] rounded-full transition-all" style={{ width: `${Math.min(100, ((user.usage_used || 0) / (user.usage_limit || 5)) * 100)}%` }} />
+            </div>
+            <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--primary)]"><Sparkles size={14} /> {t.upgrade}</span>
+          </button>
+        ))}
         <button data-testid="open-download-button" onClick={onDownload}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm hover:bg-black/[0.04] transition-colors">
           <Download size={16} /> {t.download}

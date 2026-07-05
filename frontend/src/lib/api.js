@@ -62,7 +62,12 @@ function streamSSE(url, payload, { onDelta, onImage, onDone, onError }) {
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
-      if (!res.ok || !res.body) throw new Error("Stream failed");
+      if (!res.ok || !res.body) {
+        const detail = (await res.json().catch(() => ({}))).detail || "Stream failed";
+        const err = new Error(detail);
+        err.status = res.status;
+        throw err;
+      }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";

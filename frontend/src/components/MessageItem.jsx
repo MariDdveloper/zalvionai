@@ -3,8 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { Copy, Check, FileText, Image as ImageIcon, Loader2, Film, RefreshCw } from "lucide-react";
-import { API } from "../lib/api";
+import { Copy, Check, FileText, Image as ImageIcon, RefreshCw } from "lucide-react";
 
 function CodeBlock({ inline, className, children }) {
   const [copied, setCopied] = useState(false);
@@ -63,8 +62,6 @@ function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, t }) {
             <img src={message.image_url} alt="generated" className="rounded-2xl max-w-md w-full border border-[var(--border-subtle)] shadow-sm" />
             {message.content && <p className="text-sm text-[var(--text-secondary)] mt-2">{message.content}</p>}
           </div>
-        ) : message.type === "video" ? (
-          <VideoBlock message={message} />
         ) : (
           <div className={`prose-claus max-w-none ${isStreaming ? "caret-blink" : ""}`}>
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>
@@ -78,7 +75,7 @@ function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, t }) {
               className="flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
               {copied ? <Check size={13} /> : <Copy size={13} />}{copied ? (t?.copied || "Copied") : (t?.copy || "Copy")}
             </button>
-            {canRegenerate && message.type === "text" && (
+            {canRegenerate && (
               <button data-testid="regenerate-button" onClick={onRegenerate}
                 className="flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--primary)]">
                 <RefreshCw size={13} /> {t?.regenerate || "Regenerate"}
@@ -88,27 +85,6 @@ function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, t }) {
         )}
       </div>
     </div>
-  );
-}
-
-function VideoBlock({ message }) {
-  if (message.status === "generating") {
-    return (
-      <div className="flex items-center gap-3 rounded-2xl border border-[var(--border-subtle)] bg-white px-5 py-6 max-w-md">
-        <Loader2 size={20} className="animate-spin text-[var(--primary)]" />
-        <div>
-          <p className="font-medium flex items-center gap-1.5"><Film size={15} /> Generating video…</p>
-          <p className="text-sm text-[var(--text-secondary)]">This can take a couple of minutes.</p>
-        </div>
-      </div>
-    );
-  }
-  if (message.status === "error") {
-    return <p className="text-[var(--error)]">{message.content || "Video generation failed."}</p>;
-  }
-  return (
-    <video controls playsInline src={`${API}/videos/${message.video_id}`}
-      className="rounded-2xl max-w-md w-full border border-[var(--border-subtle)] shadow-sm bg-black" />
   );
 }
 

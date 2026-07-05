@@ -1,15 +1,12 @@
 import { useState, useRef, useEffect } from "react";
-import { ArrowUp, Paperclip, Mic, Globe, ImagePlus, X, Square, FileText, Film, RectangleHorizontal, RectangleVertical } from "lucide-react";
+import { ArrowUp, Paperclip, Mic, Globe, ImagePlus, X, Square, FileText } from "lucide-react";
 import { toast } from "sonner";
 import { LANGUAGES } from "../lib/i18n";
 
 export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang }) {
   const [text, setText] = useState("");
   const [imageMode, setImageMode] = useState(false);
-  const [videoMode, setVideoMode] = useState(false);
-  const [videoDuration, setVideoDuration] = useState(4);
-  const [videoOrientation, setVideoOrientation] = useState("landscape");
-  const [attachments, setAttachments] = useState([]); // {name, kind, b64, text, preview}
+  const [attachments, setAttachments] = useState([]);
   const [listening, setListening] = useState(false);
   const taRef = useRef(null);
   const recRef = useRef(null);
@@ -39,16 +36,12 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
     if (!text.trim() && attachments.length === 0) return;
     const images = attachments.filter((a) => a.kind === "image").map((a) => a.b64);
     const fileTexts = attachments.filter((a) => a.kind === "file").map((a) => ({ name: a.name, text: a.text }));
-    const ORIENT = { landscape: "1280x720", portrait: "1024x1792", square: "1024x1024" };
     onSend({
       content: text.trim(),
       images,
       files: fileTexts,
-      mode: videoMode ? "video" : imageMode ? "image" : "chat",
+      mode: imageMode ? "image" : "chat",
       web,
-      duration: videoDuration,
-      size: ORIENT[videoOrientation],
-      image: images[0] || null,
       attachmentsMeta: attachments.map((a) => ({ name: a.name, kind: a.kind })),
     });
     setText("");
@@ -60,18 +53,16 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
     if (!SR) return toast.error("Voice input not supported in this browser");
     if (listening) { recRef.current?.stop(); return; }
     const rec = new SR();
-    const sp = LANGUAGES.find((l) => l.code === lang)?.speech || "en-US";
-    rec.lang = sp;
+    rec.lang = LANGUAGES.find((l) => l.code === lang)?.speech || "en-US";
     rec.interimResults = true;
     rec.continuous = false;
     rec.onresult = (e) => {
       let s = "";
       for (let i = e.resultIndex; i < e.results.length; i++) s += e.results[i][0].transcript;
-      setText((prev) => (e.results[0].isFinal ? (prev ? prev + " " : "") + s : prev));
-      if (e.results[e.results.length - 1].isFinal) setText((p) => p);
+      if (e.results[0].isFinal) setText((prev) => (prev ? prev + " " : "") + s);
     };
     rec.onend = () => setListening(false);
-    rec.onerror = () => { setListening(false); };
+    rec.onerror = () => setListening(false);
     recRef.current = rec;
     rec.start();
     setListening(true);
@@ -98,51 +89,18 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={videoMode ? t.video + "…" : imageMode ? t.image + "…" : t.placeholder}
+          placeholder={imageMode ? t.image + "…" : t.placeholder}
           className="w-full resize-none outline-none bg-transparent px-2 text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/70 max-h-[200px]"
         />
-        {videoMode && (
-          <div className="flex flex-wrap items-center gap-2 mt-2 px-1" data-testid="video-options">
-            <div className="flex items-center gap-1 bg-black/[0.04] rounded-full p-0.5">
-              {[4, 8, 12].map((d) => (
-                <button key={d} data-testid={`video-duration-${d}`} onClick={() => setVideoDuration(d)}
-                  className={`text-xs px-2.5 py-1 rounded-full transition-colors ${videoDuration === d ? "bg-white shadow-sm text-[var(--primary)] font-medium" : "text-[var(--text-secondary)]"}`}>
-                  {d}s
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-1 bg-black/[0.04] rounded-full p-0.5">
-              <button data-testid="video-orient-landscape" onClick={() => setVideoOrientation("landscape")} title="16:9"
-                className={`p-1.5 rounded-full transition-colors ${videoOrientation === "landscape" ? "bg-white shadow-sm text-[var(--primary)]" : "text-[var(--text-secondary)]"}`}>
-                <RectangleHorizontal size={15} />
-              </button>
-              <button data-testid="video-orient-portrait" onClick={() => setVideoOrientation("portrait")} title="9:16"
-                className={`p-1.5 rounded-full transition-colors ${videoOrientation === "portrait" ? "bg-white shadow-sm text-[var(--primary)]" : "text-[var(--text-secondary)]"}`}>
-                <RectangleVertical size={15} />
-              </button>
-              <button data-testid="video-orient-square" onClick={() => setVideoOrientation("square")} title="1:1"
-                className={`p-1.5 rounded-full transition-colors ${videoOrientation === "square" ? "bg-white shadow-sm text-[var(--primary)]" : "text-[var(--text-secondary)]"}`}>
-                <Square size={15} />
-              </button>
-            </div>
-            {attachments.some((a) => a.kind === "image") && (
-              <span className="text-xs text-[var(--primary)] flex items-center gap-1"><ImagePlus size={13} /> image → video</span>
-            )}
-          </div>
-        )}
         <div className="flex items-center justify-between mt-1.5">
           <div className="flex items-center gap-1">
             <label data-testid="attach-button" className="p-2 rounded-full hover:bg-black/[0.05] cursor-pointer transition-colors" title={t.attach}>
               <Paperclip size={18} strokeWidth={1.7} className="text-[var(--text-secondary)]" />
               <input type="file" multiple className="hidden" onChange={(e) => handleFiles(Array.from(e.target.files))} />
             </label>
-            <button data-testid="image-mode-toggle" onClick={() => { setImageMode(!imageMode); setVideoMode(false); }} title={t.image}
+            <button data-testid="image-mode-toggle" onClick={() => setImageMode(!imageMode)} title={t.image}
               className={`p-2 rounded-full transition-colors ${imageMode ? "bg-[var(--primary)]/15 text-[var(--primary)]" : "hover:bg-black/[0.05] text-[var(--text-secondary)]"}`}>
               <ImagePlus size={18} strokeWidth={1.7} />
-            </button>
-            <button data-testid="video-mode-toggle" onClick={() => { setVideoMode(!videoMode); setImageMode(false); }} title={t.video}
-              className={`p-2 rounded-full transition-colors ${videoMode ? "bg-[var(--primary)]/15 text-[var(--primary)]" : "hover:bg-black/[0.05] text-[var(--text-secondary)]"}`}>
-              <Film size={18} strokeWidth={1.7} />
             </button>
             <button data-testid="web-toggle" onClick={() => setWeb(!web)} title={t.web}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-sm transition-colors ${web ? "bg-[var(--primary)]/15 text-[var(--primary)]" : "hover:bg-black/[0.05] text-[var(--text-secondary)]"}`}>
@@ -168,7 +126,7 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
         </div>
       </div>
       {listening && <p className="text-center text-xs text-[var(--error)] mt-1.5">{t.listening}</p>}
-      <p className="text-center text-[11px] text-[var(--text-secondary)]/60 mt-2 mb-1">Claus IA · Claude Sonnet 4.6</p>
+      <p className="text-center text-[11px] text-[var(--text-secondary)]/60 mt-2 mb-1">Claus IA · Gemini 2.5 Flash</p>
     </div>
   );
 }

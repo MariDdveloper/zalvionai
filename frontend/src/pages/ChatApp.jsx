@@ -1,17 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Menu, Sparkles } from "lucide-react";
+import { Menu } from "lucide-react";
 import { toast } from "sonner";
 import { apiGet, apiPost, apiPatch, apiDelete, streamChat, streamRegenerate } from "../lib/api";
 import { getT } from "../lib/i18n";
+import { useAuth } from "../context/AuthContext";
 import Sidebar from "../components/Sidebar";
 import Composer from "../components/Composer";
 import MessageItem from "../components/MessageItem";
+import ReasoningPanel from "../components/ReasoningPanel";
 import DownloadModal from "../components/DownloadModal";
+import Pricing from "../components/Pricing";
+import { Sparkles } from "lucide-react";
 
 export default function ChatApp() {
   const { chatId } = useParams();
   const navigate = useNavigate();
+  const { user, checkAuth } = useAuth();
   const [lang, setLang] = useState(localStorage.getItem("claus_lang") || "it");
   const t = getT(lang);
   const [chats, setChats] = useState([]);
@@ -21,19 +26,15 @@ export default function ChatApp() {
   const [web, setWeb] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
+  const [showPricing, setShowPricing] = useState(false);
   const [streamingId, setStreamingId] = useState(null);
   const controllerRef = useRef(null);
   const scrollRef = useRef(null);
 
-  const loadChats = useCallback(async () => {
-    const data = await apiGet("/chats").catch(() => []);
-    setChats(data);
-  }, []);
+  const isPro = user?.plan === "pro";
 
-  const loadFolders = useCallback(async () => {
-    const data = await apiGet("/folders").catch(() => []);
-    setFolders(data);
-  }, []);
+  const loadChats = useCallback(async () => setChats(await apiGet("/chats").catch(() => [])), []);
+  const loadFolders = useCallback(async () => setFolders(await apiGet("/folders").catch(() => [])), []);
 
   useEffect(() => { loadChats(); loadFolders(); }, [loadChats, loadFolders]);
 
@@ -45,18 +46,6 @@ export default function ChatApp() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
-
-  // Poll while a video is generating
-  useEffect(() => {
-    if (!chatId) return;
-    const hasGenerating = messages.some((m) => m.type === "video" && m.status === "generating");
-    if (!hasGenerating) return;
-    const iv = setInterval(async () => {
-      const d = await apiGet(`/chats/${chatId}/messages`).catch(() => null);
-      if (d?.messages) setMessages(d.messages);
-    }, 5000);
-    return () => clearInterval(iv);
-  }, [messages, chatId]);
 
   const setLanguage = (c) => { setLang(c); localStorage.setItem("claus_lang", c); };
 
@@ -86,52 +75,23 @@ export default function ChatApp() {
   };
 
   const createFolder = async (name) => {
-    try {
-      const f = await apiPost("/folders", { name });
-      setFolders((p) => [...p, f]);
-      return f;
-    } catch (e) { toast.error(e.message); }
+    try { const f = await apiPost("/folders", { name }); setFolders((p) => [...p, f]); return f; }
+    catch (e) { toast.error(e.message); }
   };
-
   const renameFolder = async (id, name) => {
     setFolders((p) => p.map((f) => f.folder_id === id ? { ...f, name } : f));
     await apiPatch(`/folders/${id}`, { name }).catch((e) => toast.error(e.message));
   };
-
   const deleteFolder = async (id) => {
     await apiDelete(`/folders/${id}`);
     setFolders((p) => p.filter((f) => f.folder_id !== id));
     setChats((p) => p.map((c) => c.folder_id === id ? { ...c, folder_id: null } : c));
   };
 
-  const handleVideo = async (payload) => {
-    let activeChatId = chatId;
-    if (!activeChatId) {
-      const c = await apiPost("/chats");
-      setChats((p) => [c, ...p]);
-      activeChatId = c.chat_id;
-      navigate(`/c/${c.chat_id}`);
-    }
-    setBusy(true);
-    try {
-      await apiPost(`/chats/${activeChatId}/video`, {
-        content: payload.content,
-        size: payload.size || "1280x720",
-        duration: payload.duration || 4,
-        image: payload.image || null,
-        language: lang,
-      });
-      const d = await apiGet(`/chats/${activeChatId}/messages`);
-      setMessages(d.messages || []);
-      loadChats();
-    } catch (e) {
-      toast.error(e.message || "Video generation error");
-    }
-    setBusy(false);
-  };
+  const limitReached = user && user.usage_used >= user.usage_limit;
 
   const handleSend = async (payload) => {
-    if (payload.mode === "video") return handleVideo(payload);
+    if (limitReached) { setShowPricing(true); toast.error(t.limitReached); return; }
     let activeChatId = chatId;
     if (!activeChatId) {
       const c = await apiPost("/chats");
@@ -139,11 +99,7 @@ export default function ChatApp() {
       activeChatId = c.chat_id;
       navigate(`/c/${c.chat_id}`);
     }
-
-    const userMsg = {
-      id: "u" + Date.now(), role: "user", type: "text",
-      content: payload.content, attachments: payload.attachmentsMeta,
-    };
+    const userMsg = { id: "u" + Date.now(), role: "user", type: "text", content: payload.content, attachments: payload.attachmentsMeta };
     const asstId = "a" + Date.now();
     const asstMsg = { id: asstId, role: "assistant", type: payload.mode === "image" ? "image" : "text", content: "", image_url: "" };
     setMessages((p) => [...p, userMsg, asstMsg]);
@@ -154,21 +110,16 @@ export default function ChatApp() {
       content: payload.content, images: payload.images, files: payload.files,
       mode: payload.mode, web: payload.web, language: lang,
     }, {
-      onDelta: (chunk) => {
-        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m));
-      },
-      onImage: (evt) => {
-        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, type: "image", image_url: evt.url, content: evt.text || "" } : m));
-      },
+      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
+      onImage: (evt) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, type: "image", image_url: evt.url, content: evt.text || "" } : m)),
       onDone: (evt) => {
-        setBusy(false);
-        setStreamingId(null);
+        setBusy(false); setStreamingId(null);
         if (evt?.title) setChats((p) => p.map((c) => c.chat_id === activeChatId ? { ...c, title: evt.title } : c));
-        loadChats();
+        loadChats(); checkAuth();
       },
-      onError: () => {
-        setBusy(false);
-        setStreamingId(null);
+      onError: (e) => {
+        setBusy(false); setStreamingId(null);
+        if (e?.status === 402) { setShowPricing(true); setMessages((p) => p.filter((m) => m.id !== asstId && m.id !== userMsg.id)); checkAuth(); return; }
         setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error. Please try again." } : m));
       },
     });
@@ -187,7 +138,7 @@ export default function ChatApp() {
       onDone: () => { setBusy(false); setStreamingId(null); loadChats(); },
       onError: () => {
         setBusy(false); setStreamingId(null);
-        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error. Please try again." } : m));
+        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error." } : m));
       },
     });
   };
@@ -196,37 +147,48 @@ export default function ChatApp() {
 
   const empty = messages.length === 0;
   const lastAssistantId = [...messages].reverse().find((m) => m.role === "assistant" && m.type === "text")?.id;
+  const streamingMsg = streamingId ? messages.find((m) => m.id === streamingId) : null;
+  const showThinking = streamingMsg && streamingMsg.content === "" && streamingMsg.type !== "image";
 
   const sidebarProps = {
     chats, folders, activeId: chatId, onNew: newChat, onDelete: deleteChat,
     onRename: renameChat, onMove: moveChat, onNewFolder: createFolder,
     onRenameFolder: renameFolder, onDeleteFolder: deleteFolder,
     lang, onLang: setLanguage, t, onDownload: () => setShowDownload(true),
+    user, onUpgrade: () => setShowPricing(true),
   };
 
   return (
     <div className="h-screen w-screen flex overflow-hidden bg-[var(--bg-main)]">
-      {/* Sidebar desktop */}
       <div className="hidden lg:block flex-shrink-0">
         <Sidebar {...sidebarProps} onSelect={(id) => navigate(`/c/${id}`)} onClose={() => {}} />
       </div>
-      {/* Sidebar mobile */}
       {sidebarOpen && (
         <div className="lg:hidden fixed inset-0 z-50 flex">
           <div className="flex-shrink-0">
             <Sidebar {...sidebarProps}
               onSelect={(id) => { navigate(`/c/${id}`); setSidebarOpen(false); }}
               onClose={() => setSidebarOpen(false)}
-              onDownload={() => { setShowDownload(true); setSidebarOpen(false); }} />
+              onDownload={() => { setShowDownload(true); setSidebarOpen(false); }}
+              onUpgrade={() => { setShowPricing(true); setSidebarOpen(false); }} />
           </div>
           <div className="flex-1 bg-black/30" onClick={() => setSidebarOpen(false)} />
         </div>
       )}
 
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex items-center gap-3 px-4 h-14 border-b border-[var(--border-subtle)] lg:border-none">
-          <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded-lg hover:bg-black/5"><Menu size={20} /></button>
-          <span className="lg:hidden font-serif text-lg">Claus IA</span>
+        <header className="flex items-center justify-between px-4 h-14 border-b border-[var(--border-subtle)] lg:border-none">
+          <div className="flex items-center gap-3">
+            <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded-lg hover:bg-black/5"><Menu size={20} /></button>
+            <span className="lg:hidden font-serif text-lg">Claus IA</span>
+          </div>
+          {!isPro && (
+            <button data-testid="header-upgrade-button" onClick={() => setShowPricing(true)}
+              className="flex items-center gap-1.5 text-sm bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white rounded-full px-4 py-1.5 transition-colors">
+              <Sparkles size={14} /> {t.upgrade}
+            </button>
+          )}
+          {isPro && <span className="text-sm font-medium text-[var(--primary)] flex items-center gap-1"><Sparkles size={14} /> Pro</span>}
         </header>
 
         {empty ? (
@@ -257,12 +219,14 @@ export default function ChatApp() {
                     canRegenerate={!busy && m.id === lastAssistantId}
                     onRegenerate={handleRegenerate} t={t} />
                 ))}
-                {streamingId && messages.find((m) => m.id === streamingId)?.content === "" && messages.find((m) => m.id === streamingId)?.type !== "image" && (
+                {showThinking && (isPro ? (
+                  <ReasoningPanel steps={t.reasoningSteps} label={t.advancedReasoning} />
+                ) : (
                   <div className="flex gap-4">
                     <div className="claus-orb flex-shrink-0" style={{ width: 30, height: 30 }} />
                     <p className="text-[var(--text-secondary)] italic mt-1">{t.thinking}</p>
                   </div>
-                )}
+                ))}
               </div>
             </div>
             <div className="pb-4 pt-2">
@@ -273,6 +237,7 @@ export default function ChatApp() {
       </div>
 
       <DownloadModal open={showDownload} onClose={() => setShowDownload(false)} t={t} />
+      <Pricing open={showPricing} onClose={() => setShowPricing(false)} t={t} lang={lang} user={user} onUpgraded={checkAuth} />
     </div>
   );
 }
