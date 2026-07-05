@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { Mail, ArrowRight, ArrowLeft, Loader2 } from "lucide-react";
+import { Mail, ArrowRight, ArrowLeft, Loader2, Sparkles } from "lucide-react";
 import { apiPost } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { getT } from "../lib/i18n";
@@ -112,6 +112,19 @@ export default function Login() {
                   className="w-full flex items-center justify-center gap-2 bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white rounded-full py-3 font-medium transition-colors disabled:opacity-60">
                   {busy ? <Loader2 size={18} className="animate-spin" /> : <>{t.sendCode} <ArrowRight size={18} /></>}
                 </button>
+
+                <div data-testid="demo-login-box" className="mt-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-accent)] p-4">
+                  <div className="flex items-center gap-2 text-[var(--primary)] text-xs font-semibold mb-2">
+                    <Sparkles size={13} /> DEMO
+                  </div>
+                  <p className="text-sm text-[var(--text-primary)]">
+                    Email: <button type="button" data-testid="demo-email-fill" onClick={() => setEmail("onoratimariano@libero.it")}
+                      className="font-medium text-[var(--primary)] underline underline-offset-2 hover:opacity-80">onoratimariano@libero.it</button>
+                  </p>
+                  <p className="text-sm text-[var(--text-secondary)] mt-1">
+                    Per il codice chiama: <a href="tel:3899122650" data-testid="demo-phone" className="font-medium text-[var(--text-primary)]">389 912 2650</a>
+                  </p>
+                </div>
               </div>
             )}
 
