@@ -41,7 +41,18 @@ Build "Claus IA", a Claude-identical, more powerful AI web app (Italian user). C
 - Auth /auth/me (cookie + Bearer), chats create/list/persist, video endpoint message flow, full chat UI with image/video/web/voice toggles, sidebar, download, language selector, Italian login screen.
 
 ## Backlog (P1/P2)
-- P1: Full e2e AI test once budget is added; verify Google OAuth end-to-end (real Google login).
-- P1: Verify a Resend domain so OTP delivers to any email (test mode = owner email only).
-- P2: Real native installers (Electron) build pipeline (currently PWA install).
-- P2: Video options UI (duration/size/model), image-to-video, chat rename, regenerate.
+- P1: Provide PayPal Sandbox Client ID + Secret to activate real subscription buttons (currently configured:false → demo box shown).
+- P1: Provide a higher-quota Gemini key (or billing) to enable image generation (currently 429 → friendly fallback message).
+- P1: Resend domain verification (manual DNS records on registrar) so OTP delivers to any email; currently test mode = owner email only.
+- P2: Extend IMAGE_QUOTA_MSG to all 15 languages (currently it/en/es/fr/de/pt, rest fall back to English).
+- P2: Export chat to PDF/Markdown.
+- P2: Real native installers (Electron) — currently PWA install.
+
+### Iteration 4 & 5 (2026-07-05)
+- ✅ Migrated LLM to DIRECT Gemini key (google-genai SDK), model gemini-2.5-flash (text) + gemini-2.5-flash-image (images). Emergent Universal Key removed. Video removed.
+- ✅ Free/Pro daily limits (5/10) enforced server-side (db.usage). 402 → Pricing modal on frontend.
+- ✅ Pricing modal (PayPal sandbox UI, graceful demo box when unconfigured), fake marketing reviews, Pro "advanced reasoning" panel (fake UI).
+- ✅ Friendly localized image-quota fallback message (IMAGE_QUOTA_MSG).
+- ✅ Fixed Sidebar.jsx duplicate `user` declaration (compile blocker).
+- ✅ Fixed first-message-from-home race (justCreatedRef skips post-navigate fetch overwrite).
+- ✅ Backend E2E 8/8 (iteration_4), Frontend E2E 5/5 (iteration_5). All verified.

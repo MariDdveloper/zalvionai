@@ -30,6 +30,7 @@ export default function ChatApp() {
   const [streamingId, setStreamingId] = useState(null);
   const controllerRef = useRef(null);
   const scrollRef = useRef(null);
+  const justCreatedRef = useRef(null);
 
   const isPro = user?.plan === "pro";
 
@@ -40,6 +41,7 @@ export default function ChatApp() {
 
   useEffect(() => {
     if (!chatId) { setMessages([]); return; }
+    if (justCreatedRef.current === chatId) { justCreatedRef.current = null; return; }
     apiGet(`/chats/${chatId}/messages`).then((d) => setMessages(d.messages || [])).catch(() => navigate("/"));
   }, [chatId, navigate]);
 
@@ -97,6 +99,7 @@ export default function ChatApp() {
       const c = await apiPost("/chats");
       setChats((p) => [c, ...p]);
       activeChatId = c.chat_id;
+      justCreatedRef.current = c.chat_id;
       navigate(`/c/${c.chat_id}`);
     }
     const userMsg = { id: "u" + Date.now(), role: "user", type: "text", content: payload.content, attachments: payload.attachmentsMeta };
