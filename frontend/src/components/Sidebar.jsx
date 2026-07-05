@@ -9,7 +9,7 @@ import LanguageMenu from "./LanguageMenu";
 export default function Sidebar({
   chats, folders, activeId, onNew, onSelect, onDelete, onRename, onMove,
   onNewFolder, onRenameFolder, onDeleteFolder, onClose, lang, onLang, t, onDownload,
-  user, onUpgrade,
+  onUpgrade,
 }) {
   const { user, logout } = useAuth();
   const [q, setQ] = useState("");
