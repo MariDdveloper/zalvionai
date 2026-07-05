@@ -169,6 +169,20 @@ def daily_limit_for(plan: str) -> int:
     return PRO_DAILY_LIMIT if plan == "pro" else FREE_DAILY_LIMIT
 
 
+IMAGE_QUOTA_MSG = {
+    "it": "🎨 **Oggi abbiamo raggiunto il limite di generazione immagini!**\n\nLe nostre GPU creative stanno prendendo fiato dopo aver disegnato tantissimo. Riprova tra poco ✨\n\nNel frattempo posso aiutarti con testo, codice, idee e analisi — chiedimi pure!",
+    "en": "🎨 **We've hit today's image generation limit!**\n\nOur creative GPUs are catching their breath after a lot of drawing. Please try again shortly ✨\n\nIn the meantime I can help you with text, code, ideas and analysis — just ask!",
+    "es": "🎨 **¡Hemos alcanzado el límite de generación de imágenes de hoy!**\n\nNuestras GPU creativas están tomando aire. Vuelve a intentarlo en un momento ✨\n\nMientras tanto puedo ayudarte con texto, código e ideas.",
+    "fr": "🎨 **Nous avons atteint la limite de génération d'images du jour !**\n\nNos GPU créatifs reprennent leur souffle. Réessaie dans un instant ✨\n\nEn attendant, je peux t'aider avec du texte, du code et des idées.",
+    "de": "🎨 **Wir haben das heutige Limit für die Bildgenerierung erreicht!**\n\nUnsere kreativen GPUs holen kurz Luft. Bitte versuche es gleich noch einmal ✨\n\nIn der Zwischenzeit helfe ich dir gern mit Text, Code und Ideen.",
+    "pt": "🎨 **Atingimos o limite de geração de imagens de hoje!**\n\nAs nossas GPUs criativas estão a recuperar o fôlego. Tenta novamente daqui a pouco ✨\n\nEntretanto posso ajudar-te com texto, código e ideias.",
+}
+
+
+def image_quota_message(lang: str) -> str:
+    return IMAGE_QUOTA_MSG.get(lang, IMAGE_QUOTA_MSG["en"])
+
+
 async def get_usage_today(user_id: str) -> int:
     today = date.today().isoformat()
     doc = await db.usage.find_one({"user_id": user_id, "date": today}, {"_id": 0})
@@ -448,9 +462,10 @@ async def stream_chat(chat_id: str, body: ChatStreamBody, user: User = Depends(g
                     yield f"data: {json.dumps({'type': 'delta', 'content': assistant_msg['content']})}\n\n"
             except Exception as e:
                 logger.error(f"Image gen error: {e}")
-                msg = "Image generation is temporarily unavailable (quota). Please try again later."
                 if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
-                    msg = "Image quota reached on the current API key. Please try again later."
+                    msg = image_quota_message(body.language)
+                else:
+                    msg = image_quota_message(body.language)
                 assistant_msg["type"] = "text"; assistant_msg["content"] = msg
                 yield f"data: {json.dumps({'type': 'delta', 'content': msg})}\n\n"
             await db.chats.update_one({"chat_id": chat_id},
