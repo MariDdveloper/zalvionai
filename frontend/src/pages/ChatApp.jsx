@@ -11,6 +11,8 @@ import MessageItem from "../components/MessageItem";
 import ReasoningPanel from "../components/ReasoningPanel";
 import DownloadModal from "../components/DownloadModal";
 import Pricing from "../components/Pricing";
+import CodeArtifact from "../components/CodeArtifact";
+import { parseMessage } from "../lib/artifacts";
 import { Sparkles } from "lucide-react";
 
 export default function ChatApp() {
@@ -28,9 +30,12 @@ export default function ChatApp() {
   const [showDownload, setShowDownload] = useState(false);
   const [showPricing, setShowPricing] = useState(false);
   const [streamingId, setStreamingId] = useState(null);
+  const [activeArtifact, setActiveArtifact] = useState(null);
   const controllerRef = useRef(null);
   const scrollRef = useRef(null);
   const justCreatedRef = useRef(null);
+
+  const openArtifact = useCallback((art) => setActiveArtifact(art), []);
 
   const isPro = user?.plan === "pro";
 
@@ -40,6 +45,7 @@ export default function ChatApp() {
   useEffect(() => { loadChats(); loadFolders(); }, [loadChats, loadFolders]);
 
   useEffect(() => {
+    setActiveArtifact(null);
     if (!chatId) { setMessages([]); return; }
     if (justCreatedRef.current === chatId) { justCreatedRef.current = null; return; }
     apiGet(`/chats/${chatId}/messages`).then((d) => setMessages(d.messages || [])).catch(() => navigate("/"));
@@ -109,15 +115,18 @@ export default function ChatApp() {
     setBusy(true);
     setStreamingId(asstId);
 
+    let acc = "";
     controllerRef.current = streamChat(activeChatId, {
       content: payload.content, images: payload.images, files: payload.files,
       mode: payload.mode, web: payload.web, language: lang,
     }, {
-      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
+      onDelta: (chunk) => { acc += chunk; setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)); },
       onImage: (evt) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, type: "image", image_url: evt.url, content: evt.text || "" } : m)),
       onDone: (evt) => {
         setBusy(false); setStreamingId(null);
         if (evt?.title) setChats((p) => p.map((c) => c.chat_id === activeChatId ? { ...c, title: evt.title } : c));
+        const arts = parseMessage(acc).artifacts;
+        if (arts.length) setActiveArtifact(arts[arts.length - 1]);
         loadChats(); checkAuth();
       },
       onError: (e) => {
@@ -136,9 +145,10 @@ export default function ChatApp() {
     setMessages([...base, { id: asstId, role: "assistant", type: "text", content: "" }]);
     setBusy(true);
     setStreamingId(asstId);
+    let acc = "";
     controllerRef.current = streamRegenerate(chatId, { web, language: lang }, {
-      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
-      onDone: () => { setBusy(false); setStreamingId(null); loadChats(); },
+      onDelta: (chunk) => { acc += chunk; setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)); },
+      onDone: () => { setBusy(false); setStreamingId(null); const arts = parseMessage(acc).artifacts; if (arts.length) setActiveArtifact(arts[arts.length - 1]); loadChats(); },
       onError: () => {
         setBusy(false); setStreamingId(null);
         setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error." } : m));
@@ -179,7 +189,8 @@ export default function ChatApp() {
         </div>
       )}
 
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex min-w-0">
+      <div className={`flex flex-col min-w-0 h-full ${activeArtifact ? "hidden md:flex md:w-[42%] md:border-r md:border-[var(--border-subtle)]" : "flex-1"}`}>
         <header className="flex items-center justify-between px-4 h-14 border-b border-[var(--border-subtle)] lg:border-none">
           <div className="flex items-center gap-3">
             <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded-lg hover:bg-black/5"><Menu size={20} /></button>
@@ -220,7 +231,7 @@ export default function ChatApp() {
                   <MessageItem key={m.id} message={m}
                     isStreaming={streamingId === m.id && !m.content && m.type !== "image"}
                     canRegenerate={!busy && m.id === lastAssistantId}
-                    onRegenerate={handleRegenerate} t={t} />
+                    onRegenerate={handleRegenerate} onOpenArtifact={openArtifact} t={t} />
                 ))}
                 {showThinking && (isPro ? (
                   <ReasoningPanel steps={t.reasoningSteps} label={t.advancedReasoning} />
@@ -236,6 +247,10 @@ export default function ChatApp() {
               <Composer onSend={handleSend} busy={busy} onStop={stop} web={web} setWeb={setWeb} t={t} lang={lang} />
             </div>
           </>
+        )}
+        </div>
+        {activeArtifact && (
+          <CodeArtifact artifact={activeArtifact} lang={lang} onClose={() => setActiveArtifact(null)} className="flex-1 h-full" />
         )}
       </div>
 

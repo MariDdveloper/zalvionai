@@ -3,7 +3,31 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { Copy, Check, FileText, Image as ImageIcon, RefreshCw } from "lucide-react";
+import { Copy, Check, FileText, Image as ImageIcon, RefreshCw, Code2, Loader2, ArrowRight } from "lucide-react";
+import { parseMessage, TOKEN_SPLIT_RE } from "../lib/artifacts";
+
+function ArtifactCard({ artifact, onOpen }) {
+  return (
+    <button data-testid="artifact-card" onClick={() => onOpen?.(artifact)}
+      className="group/art flex items-center gap-3 w-full max-w-md my-3 text-left rounded-2xl border border-[var(--border-subtle)] bg-white hover:border-[var(--primary)] hover:shadow-md transition-all px-4 py-3">
+      <div className="claus-orb flex-shrink-0" style={{ width: 34, height: 34 }} />
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-[var(--text-primary)] truncate flex items-center gap-1.5"><Code2 size={14} className="text-[var(--primary)]" /> {artifact.title}</p>
+        <p className="text-xs text-[var(--text-secondary)]">{Object.keys(artifact.files).length} file · {artifact.type}</p>
+      </div>
+      <ArrowRight size={16} className="text-[var(--text-secondary)] group-hover/art:text-[var(--primary)] group-hover/art:translate-x-0.5 transition-all flex-shrink-0" />
+    </button>
+  );
+}
+
+function BuildingCard() {
+  return (
+    <div data-testid="artifact-building" className="flex items-center gap-3 w-full max-w-md my-3 rounded-2xl border border-[var(--border-subtle)] bg-white px-4 py-3">
+      <Loader2 size={20} className="animate-spin text-[var(--primary)] flex-shrink-0" />
+      <p className="text-sm text-[var(--text-secondary)]">Generazione del progetto…</p>
+    </div>
+  );
+}
 
 function CodeBlock({ inline, className, children }) {
   const [copied, setCopied] = useState(false);
@@ -26,7 +50,7 @@ function CodeBlock({ inline, className, children }) {
   );
 }
 
-function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, t }) {
+function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, onOpenArtifact, t }) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
 
@@ -64,9 +88,27 @@ function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, t }) {
           </div>
         ) : (
           <div className={`prose-claus max-w-none ${isStreaming ? "caret-blink" : ""}`}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>
-              {message.content || ""}
-            </ReactMarkdown>
+            {(() => {
+              const { text, artifacts, pending } = parseMessage(message.content || "");
+              const segments = text.split(TOKEN_SPLIT_RE);
+              return (
+                <>
+                  {segments.map((seg, i) => {
+                    if (i % 2 === 1) {
+                      const art = artifacts.find((a) => String(a.id) === seg);
+                      return art ? <ArtifactCard key={i} artifact={art} onOpen={onOpenArtifact} /> : null;
+                    }
+                    if (!seg.trim()) return null;
+                    return (
+                      <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>
+                        {seg}
+                      </ReactMarkdown>
+                    );
+                  })}
+                  {pending && <BuildingCard />}
+                </>
+              );
+            })()}
           </div>
         )}
         {!isStreaming && message.type !== "image" && message.content && (

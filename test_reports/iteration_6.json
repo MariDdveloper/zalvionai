@@ -1,0 +1,25 @@
+{
+  "summary": "Frontend-only verification of the Preview/Code Artifact panel feature. All 8 review-request scenarios PASS end-to-end against the deployed preview URL with the QA session token. Gemini streams valid <claus-artifact> blocks; parseMessage extracts them; ArtifactCard + auto-open + CodeArtifact panel + iframe live preview + Code tab + panel controls all work; runtime errors are caught in-iframe without crashing the outer app.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "artifacts.js lines 54-61: the pending-artifact branch computes `text` twice (dead first assignment). Cosmetic; behavior is correct (final assignment `text = content.slice(0, lastOpen)` wins).",
+    "preview.js line 106 sandbox=\"allow-scripts allow-modals allow-forms allow-popups allow-pointer-lock\" — no allow-same-origin (correct, keeps iframe isolated). Consider adding allow-popups-to-escape-sandbox only if user apps need window.open.",
+    "CodeArtifact.jsx download button downloads each file via multiple <a>.click() calls without user gesture batching; in Firefox the browser may block after ~1 file. Consider zipping into a single archive.",
+    "MessageItem.jsx ArtifactCard displays only `artifact.type` label; for `static` this may confuse users – could show a friendlier label (HTML statico)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (per request)", "frontend": "100% (8/8 requested scenarios)"},
+  "test_credentials": "QA token: localStorage.setItem('claus_token','test_session_qa_01') → user_testqa01 / qa@claus.test.",
+  "seed_data_creation": "During test: set db.users.plan='pro' for user_testqa01 and cleared db.usage. AFTER tests: restored plan to 'free' and cleared usage (verified with mongo query).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All 8 review-request scenarios verified PASS: (1) Normal chat 'fotosintesi' → assistant answer, NO artifact-card, NO code-artifact-panel. (2) React counter → artifact-card appears, auto-open triggers on stream done, artifact-preview-iframe renders live app ('Contatore Reattivo, 0, -, +'), Codice tab shows artifact-file-tree with App.js + styles.css. (3) Static HTML landing → artifact type='static', iframe renders 'Benvenuti sulla Nostra Pagina! ... Scopri di Più'. (4) Python Fibonacci → artifact type='python', panel opens on Codice tab by default, iframe NOT present, clicking Anteprima tab shows 'Anteprima live non disponibile per questo linguaggio.' (5) Runtime error → BuggyApp calling window.thisDoesNotExistXYZ() renders the red 'Errore di runtime' box inside the iframe; outer Claus IA composer + sidebar remain fully functional. (6) Panel controls: artifact-close hides panel; artifact-download fires 2 download events (App.js, styles.css); artifact-refresh clicks OK. (7) Auto-open verified for React, Static, Python. (8) Switching to a different existing sidebar chat (chat-item-<id>) clears the panel (setActiveArtifact(null) in useEffect([chatId])); Nuova chat also clears the panel. No blocking bugs found.",
+  "rca of the issue": "N/A — no issues."
+}
