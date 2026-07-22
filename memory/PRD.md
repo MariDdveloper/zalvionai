@@ -1,4 +1,14 @@
-# Claus IA — PRD
+# Zalvion AI — PRD (ex "Claus IA")
+
+> STATO (2026-06): Rebrand completo a **Zalvion AI**. AI migrata da Gemini a **Pollinations AI** (gratis, no chiave). Paywall rimosso: tutto gratis, limite **10 generazioni/24h** per utente. Nuova landing "Get Started" con lettera dello sviluppatore in **15 lingue** + firma. DB su **MongoDB Atlas** (`ia_utenti_db`).
+>
+> ⚠️ BLOCCO NOTO: la generazione **TESTO** Pollinations dal tier anonimo (IP server condiviso) restituisce 402/429 → serve un **token gratuito** Pollinations (registrarsi su auth.pollinations.ai) da mettere in `POLLINATIONS_TOKEN` nel backend .env. Le **immagini** funzionano (girano dal browser client).
+>
+> FASE B DA FARE (richiede credenziali utente): migrazione auth+DB a **Supabase** (Google OAuth nativo, tabelle profiles/messages/rate_limits, RLS) e email onboarding **Resend** dal dominio `getzalvion.com`. Domini `zalvionai.com`/`getzalvion.com` da configurare in deploy.
+
+---
+
+# Claus IA — PRD (storico)
 
 ## Original problem statement
 Build "Claus IA", a Claude-identical, more powerful AI web app (Italian user). Chat (with web info), image + video generation, deep reasoning, file/image upload understanding, modern Claude-like UI, Google login + email OTP, per-account saved chats with "New chat", desktop app download (Win/Mac/Linux), 15 languages, real voice input. No placeholders.

@@ -109,7 +109,7 @@ export default function Sidebar({
       <div className="flex items-center justify-between px-4 py-4">
         <div className="flex items-center gap-2.5">
           <div className="claus-orb" style={{ width: 30, height: 30 }} />
-          <span className="font-serif text-xl">Claus IA</span>
+          <span className="font-serif text-xl">Zalvion AI</span>
         </div>
         <button onClick={onClose} className="lg:hidden p-1.5 rounded-lg hover:bg-black/5"><PanelLeftClose size={18} /></button>
       </div>
@@ -188,23 +188,17 @@ export default function Sidebar({
       </div>
 
       <div className="border-t border-[var(--border-subtle)] p-3 space-y-2">
-        {user && (user.plan === "pro" ? (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-[var(--primary)]/10 text-[var(--primary)] text-sm font-medium" data-testid="sidebar-plan-badge">
-            <Sparkles size={15} /> Claus IA Pro
-          </div>
-        ) : (
-          <button data-testid="sidebar-upgrade-button" onClick={onUpgrade}
-            className="w-full text-left rounded-xl border border-[var(--primary)]/40 bg-[var(--bg-accent)] p-3 hover:border-[var(--primary)] transition-colors">
+        {user && (
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-accent)] p-3" data-testid="sidebar-usage">
             <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] mb-1.5">
-              <span>{Math.max(0, (user.usage_limit || 5) - (user.usage_used || 0))} {t.messagesLeft}</span>
-              <span>{user.usage_used || 0}/{user.usage_limit || 5}</span>
+              <span>{Math.max(0, (user.usage_limit || 10) - (user.usage_used || 0))} {t.messagesLeft}</span>
+              <span>{user.usage_used || 0}/{user.usage_limit || 10}</span>
             </div>
-            <div className="h-1.5 rounded-full bg-black/[0.06] overflow-hidden mb-2.5">
-              <div className="h-full bg-[var(--primary)] rounded-full transition-all" style={{ width: `${Math.min(100, ((user.usage_used || 0) / (user.usage_limit || 5)) * 100)}%` }} />
+            <div className="h-1.5 rounded-full bg-black/[0.06] overflow-hidden">
+              <div className="h-full bg-[var(--primary)] rounded-full transition-all" style={{ width: `${Math.min(100, ((user.usage_used || 0) / (user.usage_limit || 10)) * 100)}%` }} />
             </div>
-            <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--primary)]"><Sparkles size={14} /> {t.upgrade}</span>
-          </button>
-        ))}
+          </div>
+        )}
         <button data-testid="open-download-button" onClick={onDownload}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm hover:bg-black/[0.04] transition-colors">
           <Download size={16} /> {t.download}

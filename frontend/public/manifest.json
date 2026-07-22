@@ -1,15 +1,13 @@
 {
-  "short_name": "Claus IA",
-  "name": "Claus IA — Your Perfect AI",
-  "description": "Chat, reason, search the web, and generate images with Claus IA in 15 languages.",
+  "short_name": "Zalvion AI",
+  "name": "Zalvion AI — Your Perfect AI for Code",
+  "description": "The perfect AI for writing code. Chat, generate images and build apps with a live code preview, in 15 languages.",
   "icons": [
     { "src": "icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any maskable" },
     { "src": "icon-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any maskable" }
   ],
-  "id": "/",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": ".",
   "display": "standalone",
-  "theme_color": "#D97251",
-  "background_color": "#FDFDF9"
+  "theme_color": "#0A0A0F",
+  "background_color": "#0A0A0F"
 }

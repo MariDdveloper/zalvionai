@@ -8,9 +8,7 @@ import { useAuth } from "../context/AuthContext";
 import Sidebar from "../components/Sidebar";
 import Composer from "../components/Composer";
 import MessageItem from "../components/MessageItem";
-import ReasoningPanel from "../components/ReasoningPanel";
 import DownloadModal from "../components/DownloadModal";
-import Pricing from "../components/Pricing";
 import CodeArtifact from "../components/CodeArtifact";
 import { parseMessage } from "../lib/artifacts";
 import { Sparkles } from "lucide-react";
@@ -28,7 +26,6 @@ export default function ChatApp() {
   const [web, setWeb] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
-  const [showPricing, setShowPricing] = useState(false);
   const [streamingId, setStreamingId] = useState(null);
   const [activeArtifact, setActiveArtifact] = useState(null);
   const controllerRef = useRef(null);
@@ -37,7 +34,7 @@ export default function ChatApp() {
 
   const openArtifact = useCallback((art) => setActiveArtifact(art), []);
 
-  const isPro = user?.plan === "pro";
+  const limitMsg = () => `Daily limit reached (${user?.usage_used || 0}/${user?.usage_limit || 10} tokens used). Recharging compute nodes. Please return tomorrow.`;
 
   const loadChats = useCallback(async () => setChats(await apiGet("/chats").catch(() => [])), []);
   const loadFolders = useCallback(async () => setFolders(await apiGet("/folders").catch(() => [])), []);
@@ -99,7 +96,7 @@ export default function ChatApp() {
   const limitReached = user && user.usage_used >= user.usage_limit;
 
   const handleSend = async (payload) => {
-    if (limitReached) { setShowPricing(true); toast.error(t.limitReached); return; }
+    if (limitReached) { toast.error(limitMsg()); return; }
     let activeChatId = chatId;
     if (!activeChatId) {
       const c = await apiPost("/chats");
@@ -131,7 +128,7 @@ export default function ChatApp() {
       },
       onError: (e) => {
         setBusy(false); setStreamingId(null);
-        if (e?.status === 402) { setShowPricing(true); setMessages((p) => p.filter((m) => m.id !== asstId && m.id !== userMsg.id)); checkAuth(); return; }
+        if (e?.status === 402) { toast.error(limitMsg()); setMessages((p) => p.filter((m) => m.id !== asstId && m.id !== userMsg.id)); checkAuth(); return; }
         setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error. Please try again." } : m));
       },
     });
@@ -168,7 +165,7 @@ export default function ChatApp() {
     onRename: renameChat, onMove: moveChat, onNewFolder: createFolder,
     onRenameFolder: renameFolder, onDeleteFolder: deleteFolder,
     lang, onLang: setLanguage, t, onDownload: () => setShowDownload(true),
-    user, onUpgrade: () => setShowPricing(true),
+    user,
   };
 
   return (
@@ -182,8 +179,7 @@ export default function ChatApp() {
             <Sidebar {...sidebarProps}
               onSelect={(id) => { navigate(`/c/${id}`); setSidebarOpen(false); }}
               onClose={() => setSidebarOpen(false)}
-              onDownload={() => { setShowDownload(true); setSidebarOpen(false); }}
-              onUpgrade={() => { setShowPricing(true); setSidebarOpen(false); }} />
+              onDownload={() => { setShowDownload(true); setSidebarOpen(false); }} />
           </div>
           <div className="flex-1 bg-black/30" onClick={() => setSidebarOpen(false)} />
         </div>
@@ -194,15 +190,9 @@ export default function ChatApp() {
         <header className="flex items-center justify-between px-4 h-14 border-b border-[var(--border-subtle)] lg:border-none">
           <div className="flex items-center gap-3">
             <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded-lg hover:bg-black/5"><Menu size={20} /></button>
-            <span className="lg:hidden font-serif text-lg">Claus IA</span>
+            <span className="lg:hidden font-serif text-lg">Zalvion AI</span>
           </div>
-          {!isPro && (
-            <button data-testid="header-upgrade-button" onClick={() => setShowPricing(true)}
-              className="flex items-center gap-1.5 text-sm bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white rounded-full px-4 py-1.5 transition-colors">
-              <Sparkles size={14} /> {t.upgrade}
-            </button>
-          )}
-          {isPro && <span className="text-sm font-medium text-[var(--primary)] flex items-center gap-1"><Sparkles size={14} /> Pro</span>}
+          <span className="text-xs text-[var(--text-secondary)] flex items-center gap-1"><Sparkles size={13} className="text-[var(--primary)]" /> {user?.usage_used || 0}/{user?.usage_limit || 10}</span>
         </header>
 
         {empty ? (
@@ -233,14 +223,12 @@ export default function ChatApp() {
                     canRegenerate={!busy && m.id === lastAssistantId}
                     onRegenerate={handleRegenerate} onOpenArtifact={openArtifact} t={t} />
                 ))}
-                {showThinking && (isPro ? (
-                  <ReasoningPanel steps={t.reasoningSteps} label={t.advancedReasoning} />
-                ) : (
+                {showThinking && (
                   <div className="flex gap-4">
                     <div className="claus-orb flex-shrink-0" style={{ width: 30, height: 30 }} />
                     <p className="text-[var(--text-secondary)] italic mt-1">{t.thinking}</p>
                   </div>
-                ))}
+                )}
               </div>
             </div>
             <div className="pb-4 pt-2">
@@ -255,7 +243,6 @@ export default function ChatApp() {
       </div>
 
       <DownloadModal open={showDownload} onClose={() => setShowDownload(false)} t={t} />
-      <Pricing open={showPricing} onClose={() => setShowPricing(false)} t={t} lang={lang} user={user} onUpgraded={checkAuth} />
     </div>
   );
 }

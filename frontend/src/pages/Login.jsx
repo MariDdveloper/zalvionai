@@ -59,7 +59,7 @@ export default function Login() {
         <div className="absolute bottom-12 left-12 right-12 text-white">
           <div className="flex items-center gap-3 mb-5">
             <div className="claus-orb" style={{ width: 38, height: 38 }} />
-            <span className="font-serif text-2xl">Claus IA</span>
+            <span className="font-serif text-2xl">Zalvion AI</span>
           </div>
           <h2 className="font-serif text-4xl leading-tight max-w-md">{t.welcome}</h2>
         </div>
@@ -74,12 +74,12 @@ export default function Login() {
           <div className="w-full max-w-sm fade-up">
             <div className="lg:hidden flex items-center gap-3 mb-8">
               <div className="claus-orb" style={{ width: 36, height: 36 }} />
-              <span className="font-serif text-2xl">Claus IA</span>
+              <span className="font-serif text-2xl">Zalvion AI</span>
             </div>
 
             {step === "welcome" && (
               <div>
-                <h1 className="font-serif text-4xl tracking-tight mb-2">Claus IA</h1>
+                <h1 className="font-serif text-4xl tracking-tight mb-2">Zalvion AI</h1>
                 <p className="text-[var(--text-secondary)] mb-8">{t.welcomeSub}</p>
                 <button data-testid="login-google-button" onClick={googleLogin}
                   className="w-full flex items-center justify-center gap-3 border border-[var(--border-subtle)] bg-white rounded-full py-3 px-4 font-medium hover:bg-black/[0.03] transition-colors">

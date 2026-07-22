@@ -10,8 +10,10 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
 
+import httpx
 import resend
 import requests
+from urllib.parse import quote
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
 from fastapi.responses import StreamingResponse
@@ -34,9 +36,15 @@ SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'onboarding@resend.dev')
 resend.api_key = RESEND_API_KEY
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 TEXT_MODEL = "gemini-2.5-flash"
 IMAGE_MODEL = "gemini-2.5-flash-image"
+
+# ---- Pollinations AI (free, keyless, stateless) ----
+POLLINATIONS_TEXT_URL = "https://text.pollinations.ai/openai"
+POLLINATIONS_IMAGE_URL = "https://image.pollinations.ai/prompt/"
+POLLINATIONS_TEXT_MODEL = "openai"
+POLLINATIONS_IMAGE_MODEL = "flux"
+POLLINATIONS_REFERRER = "zalvionai.com"
 
 PAYPAL_MODE = os.environ.get('PAYPAL_MODE', 'sandbox')
 PAYPAL_CLIENT_ID = os.environ.get('PAYPAL_CLIENT_ID', '')
@@ -44,7 +52,7 @@ PAYPAL_SECRET = os.environ.get('PAYPAL_SECRET', '')
 PAYPAL_WEBHOOK_ID = os.environ.get('PAYPAL_WEBHOOK_ID', '')
 PAYPAL_BASE = "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == 'sandbox' else "https://api-m.paypal.com"
 
-FREE_DAILY_LIMIT = 5
+FREE_DAILY_LIMIT = 10
 PRO_DAILY_LIMIT = 10
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -60,9 +68,10 @@ LANG_NAMES = {
 }
 
 SYSTEM_PROMPT = (
-    "You are Claus IA, an exceptionally capable, friendly and brilliant AI assistant. "
-    "You reason deeply, explain clearly, write excellent code, and can analyze documents and images "
-    "the user shares. Use Markdown formatting (headings, lists, tables, fenced code blocks with language ids). "
+    "You are Zalvion AI, an elite, world-class software engineer and AI assistant — the perfect AI, "
+    "especially for writing code. You reason deeply, explain clearly, write flawless production-grade code, "
+    "debug and fix scraping/automation issues, and can analyze documents and images the user shares. "
+    "Use Markdown formatting (headings, lists, tables, fenced code blocks with language ids). "
     "Always answer in the user's language: {lang}.\n\n"
     "ARTIFACTS — VERY IMPORTANT:\n"
     "When the user asks you to build, create, code or write a runnable PROJECT (a web app, component, "
@@ -402,36 +411,62 @@ async def get_messages(chat_id: str, user: User = Depends(get_current_user)):
     return {"messages": chat.get("messages", []), "title": chat.get("title")}
 
 
-# ---------- Gemini helpers ----------
-def build_contents(history, user_text, images):
-    contents = []
+# ---------- Pollinations helpers ----------
+def build_messages(history, user_text, lang_name):
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
     for m in history:
-        role = "user" if m["role"] == "user" else "model"
-        txt = m.get("content", "")
+        role = "user" if m["role"] == "user" else "assistant"
+        txt = m.get("content", "") or " "
         if m.get("type") == "image":
             txt = txt or "[generated an image]"
-        contents.append(types.Content(role=role, parts=[types.Part(text=txt or " ")]))
-    parts = [types.Part(text=user_text or " ")]
-    for b64 in images:
+        msgs.append({"role": role, "content": txt})
+    msgs.append({"role": "user", "content": user_text or " "})
+    return msgs
+
+
+async def pollinations_text_stream(messages):
+    payload = {"model": POLLINATIONS_TEXT_MODEL, "messages": messages,
+               "stream": True, "referrer": POLLINATIONS_REFERRER}
+    token = os.environ.get("POLLINATIONS_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    last_err = None
+    for attempt in range(2):
+        got_any = False
         try:
-            parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type=detect_mime(b64)))
-        except Exception:
-            pass
-    contents.append(types.Content(role="user", parts=parts))
-    return contents
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
+                async with client.stream("POST", POLLINATIONS_TEXT_URL, json=payload, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        raise httpx.HTTPStatusError(f"status {resp.status_code}", request=resp.request, response=resp)
+                    async for line in resp.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            return
+                        try:
+                            obj = json.loads(data)
+                            delta = obj["choices"][0].get("delta", {}).get("content")
+                        except Exception:
+                            continue
+                        if delta:
+                            got_any = True
+                            yield delta
+            if got_any:
+                return
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Pollinations attempt {attempt + 1} failed: {e}")
+        await asyncio.sleep(1.2 * (attempt + 1))
+    if last_err:
+        raise last_err
 
 
-async def gemini_text_stream(contents, lang_name, web):
-    cfg = types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT.format(lang=lang_name),
-        max_output_tokens=8000,
-    )
-    if web:
-        cfg.tools = [types.Tool(google_search=types.GoogleSearch())]
-    async for chunk in await gemini_client.aio.models.generate_content_stream(
-        model=TEXT_MODEL, contents=contents, config=cfg):
-        if getattr(chunk, "text", None):
-            yield chunk.text
+def pollinations_image_url(prompt: str) -> str:
+    seed = random.randint(1, 10 ** 9)
+    return (f"{POLLINATIONS_IMAGE_URL}{quote(prompt or 'a beautiful high quality image')}"
+            f"?width=1024&height=1024&seed={seed}&model={POLLINATIONS_IMAGE_MODEL}"
+            f"&nologo=true&referrer={POLLINATIONS_REFERRER}")
 
 
 # ---------- Chat stream ----------
@@ -458,41 +493,13 @@ async def stream_chat(chat_id: str, body: ChatStreamBody, user: User = Depends(g
     if chat["title"] == "New chat" and body.content:
         new_title = body.content[:48]
 
-    # ----- IMAGE MODE -----
+    # ----- IMAGE MODE (Pollinations) -----
     if body.mode == "image":
         async def image_gen():
+            url = pollinations_image_url(body.content or "")
             assistant_msg = {"id": uuid.uuid4().hex, "role": "assistant", "type": "image",
-                             "content": "", "image_url": "", "created_at": now_utc().isoformat()}
-            try:
-                parts = [types.Part(text=body.content or "Generate an image")]
-                for b64 in body.images:
-                    parts.append(types.Part.from_bytes(data=base64.b64decode(b64), mime_type=detect_mime(b64)))
-                resp = await gemini_client.aio.models.generate_content(
-                    model=IMAGE_MODEL, contents=parts,
-                    config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"]))
-                data_url, caption = "", ""
-                for part in resp.candidates[0].content.parts:
-                    if getattr(part, "inline_data", None) and part.inline_data.data:
-                        b64img = base64.b64encode(part.inline_data.data).decode()
-                        data_url = f"data:{part.inline_data.mime_type};base64,{b64img}"
-                    elif getattr(part, "text", None):
-                        caption += part.text
-                if data_url:
-                    assistant_msg["image_url"] = data_url
-                    assistant_msg["content"] = caption
-                    yield f"data: {json.dumps({'type': 'image', 'url': data_url, 'text': caption})}\n\n"
-                else:
-                    assistant_msg["type"] = "text"
-                    assistant_msg["content"] = caption or "I couldn't generate that image."
-                    yield f"data: {json.dumps({'type': 'delta', 'content': assistant_msg['content']})}\n\n"
-            except Exception as e:
-                logger.error(f"Image gen error: {e}")
-                if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
-                    msg = image_quota_message(body.language)
-                else:
-                    msg = image_quota_message(body.language)
-                assistant_msg["type"] = "text"; assistant_msg["content"] = msg
-                yield f"data: {json.dumps({'type': 'delta', 'content': msg})}\n\n"
+                             "content": "", "image_url": url, "created_at": now_utc().isoformat()}
+            yield f"data: {json.dumps({'type': 'image', 'url': url, 'text': ''})}\n\n"
             await db.chats.update_one({"chat_id": chat_id},
                 {"$push": {"messages": {"$each": [user_msg, assistant_msg]}},
                  "$set": {"updated_at": now_utc().isoformat(), "title": new_title}})
@@ -501,29 +508,21 @@ async def stream_chat(chat_id: str, body: ChatStreamBody, user: User = Depends(g
         return StreamingResponse(image_gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # ----- CHAT MODE -----
-    contents = build_contents(history, user_text, body.images)
+    # ----- CHAT MODE (Pollinations) -----
+    messages = build_messages(history, user_text, lang_name)
 
     async def text_gen():
         assistant_text = []
         try:
-            async for piece in gemini_text_stream(contents, lang_name, body.web):
+            async for piece in pollinations_text_stream(messages):
                 assistant_text.append(piece)
                 yield f"data: {json.dumps({'type': 'delta', 'content': piece})}\n\n"
         except Exception as e:
-            logger.error(f"Gemini stream error: {e}")
+            logger.error(f"Pollinations stream error: {e}")
             if not assistant_text:
-                try:
-                    async for piece in gemini_text_stream(contents, lang_name, False):
-                        assistant_text.append(piece)
-                        yield f"data: {json.dumps({'type': 'delta', 'content': piece})}\n\n"
-                except Exception as e2:
-                    logger.error(f"Gemini fallback error: {e2}")
-                    msg = "Sorry, something went wrong generating a response."
-                    if "RESOURCE_EXHAUSTED" in str(e2) or "429" in str(e2):
-                        msg = "The AI quota on the current API key is exhausted. Please try again later."
-                    assistant_text.append(msg)
-                    yield f"data: {json.dumps({'type': 'delta', 'content': msg})}\n\n"
+                msg = "Sorry, the AI service is briefly unavailable. Please try again."
+                assistant_text.append(msg)
+                yield f"data: {json.dumps({'type': 'delta', 'content': msg})}\n\n"
         full = "".join(assistant_text)
         assistant_msg = {"id": uuid.uuid4().hex, "role": "assistant", "type": "text",
                          "content": full, "created_at": now_utc().isoformat()}
@@ -556,12 +555,12 @@ async def regenerate_chat(chat_id: str, body: RegenBody, user: User = Depends(ge
 
     lang_name = LANG_NAMES.get(body.language, "English")
     last_user = messages[-1]
-    contents = build_contents(messages[:-1], last_user.get("content") or " ", [])
+    convo = build_messages(messages[:-1], last_user.get("content") or " ", lang_name)
 
     async def gen():
         assistant_text = []
         try:
-            async for piece in gemini_text_stream(contents, lang_name, body.web):
+            async for piece in pollinations_text_stream(convo):
                 assistant_text.append(piece)
                 yield f"data: {json.dumps({'type': 'delta', 'content': piece})}\n\n"
         except Exception as e:

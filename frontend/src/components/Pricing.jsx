@@ -41,7 +41,7 @@ export default function Pricing({ open, onClose, t, lang, user, onUpgraded }) {
           <button onClick={onClose} className="absolute top-4 right-4 p-2 rounded-full hover:bg-black/5"><X size={20} /></button>
           <div className="inline-flex items-center gap-2 text-[var(--primary)] text-sm font-medium mb-2"><Sparkles size={15} /> {t.pricingTag || "Upgrade your intelligence"}</div>
           <h2 className="font-serif text-4xl">{t.pricingTitle || "Choose your plan"}</h2>
-          <p className="text-[var(--text-secondary)] mt-2 max-w-lg mx-auto">{t.pricingSub || "Join thousands using Claus IA every day. Unlock double the power with Pro."}</p>
+          <p className="text-[var(--text-secondary)] mt-2 max-w-lg mx-auto">{t.pricingSub || "Join thousands using Zalvion AI every day. Unlock double the power with Pro."}</p>
 
           <div className="inline-flex items-center gap-1 bg-black/[0.05] rounded-full p-1 mt-5">
             <button data-testid="billing-monthly" onClick={() => setBilling("monthly")}

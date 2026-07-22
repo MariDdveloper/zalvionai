@@ -32,7 +32,7 @@ export default function DownloadModal({ open, onClose, t }) {
       setInstalled(true);
       toast.success(t.installed);
     } else {
-      toast.error("Install unavailable in this browser. Open Claus IA in Chrome or Edge on desktop to install the app.");
+      toast.error("Install unavailable in this browser. Open Zalvion AI in Chrome or Edge on desktop to install the app.");
     }
   };
 

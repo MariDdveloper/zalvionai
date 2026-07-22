@@ -1,4 +1,4 @@
-// Parses Claus IA "artifact" blocks out of an assistant message.
+// Parses Zalvion AI "artifact" blocks out of an assistant message.
 // Format produced by the model:
 // <claus-artifact type="react" title="Todo App">
 // <file path="/App.js">...code...</file>

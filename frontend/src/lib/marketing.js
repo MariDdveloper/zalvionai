@@ -1,34 +1,33 @@
-// Marketing content + testimonials for Claus IA (bilingual it/en, fallback en).
-
+// Hyper-realistic testimonials for Zalvion AI (coder & student focused, natural imperfections).
 const REVIEWS = {
   it: [
-    { name: "Giulia Marchetti", role: "Content Strategist", text: "Claus IA ha rivoluzionato il mio lavoro: risposte istantanee, precise e brillanti. Non torno più indietro.", rating: 5 },
-    { name: "Marco De Santis", role: "Founder & CEO", text: "Più veloce e più intelligente di qualsiasi altra IA che ho provato. Il piano Pro vale ogni centesimo.", rating: 5 },
-    { name: "Sara Bianchi", role: "Sviluppatrice", text: "Scrive codice pulito, spiega tutto e cerca sul web in tempo reale. È come avere un senior al mio fianco.", rating: 5 },
-    { name: "Luca Ferrari", role: "Studente universitario", text: "Mi salva ogni giorno per studio e progetti. Le immagini generate sono spettacolari.", rating: 5 },
-    { name: "Elena Russo", role: "Marketing Manager", text: "Interfaccia bellissima, 15 lingue, dettatura vocale. Semplicemente perfetta.", rating: 5 },
-    { name: "Davide Conti", role: "Product Designer", text: "Il Ragionamento Avanzato del Pro è impressionante: risposte ponderate e complete. Consigliatissimo.", rating: 5 },
+    { name: "Luca R.", role: "Sviluppatore full-stack", text: "Ragazzi ma è assurdo!! Gli ho passato un bug di scraping che mi bloccava da 3 giorni e me l'ha risolto al primo colpo. Scrive codice pulito davvero.", rating: 5 },
+    { name: "Martina P.", role: "Studentessa di Informatica", text: "lo uso ogni giorno per i progetti universitari, mi spiega tutto passo passo. onestamente meglio di tanti prof lol", rating: 5 },
+    { name: "Simone C.", role: "Backend dev", text: "Finalmente una AI che NON inventa librerie che non esistono. Il codice gira e basta. Lo tengo aperto tutto il giorno.", rating: 5 },
+    { name: "Giada M.", role: "Frontend developer", text: "L'anteprima live del codice è una figata pazzesca, vedo subito il risultato. Mi ha fatto risparmiare un sacco di tempo!", rating: 5 },
+    { name: "Alessandro T.", role: "Studente liceo (informatica)", text: "avevo paura fosse la solita AI lenta e invece è velocissima. mi ha aiutato a fare il sito per la scuola in una serata", rating: 5 },
+    { name: "Federico N.", role: "Data engineer", text: "Uso Zalvion per gli script di scraping e automazione. Capisce esattamente cosa voglio, anche quando spiego male. Consigliatissimo!!", rating: 5 },
   ],
   en: [
-    { name: "Julia Marsh", role: "Content Strategist", text: "Claus IA transformed how I work: instant, precise, brilliant answers. I'm never going back.", rating: 5 },
-    { name: "Mark Danes", role: "Founder & CEO", text: "Faster and smarter than any other AI I've tried. The Pro plan is worth every cent.", rating: 5 },
-    { name: "Sara White", role: "Software Developer", text: "It writes clean code, explains everything and searches the web in real time. Like a senior by my side.", rating: 5 },
-    { name: "Luke Ferris", role: "University Student", text: "Saves me every day for study and projects. The generated images are stunning.", rating: 5 },
-    { name: "Helen Ross", role: "Marketing Manager", text: "Gorgeous interface, 15 languages, voice dictation. Simply perfect.", rating: 5 },
-    { name: "David Cohen", role: "Product Designer", text: "Pro's Advanced Reasoning is impressive: thoughtful, complete answers. Highly recommended.", rating: 5 },
+    { name: "Luke R.", role: "Full-stack developer", text: "Guys this is insane!! Gave it a scraping bug that blocked me for 3 days and it fixed it first try. Genuinely clean code.", rating: 5 },
+    { name: "Martina P.", role: "CS student", text: "i use it every day for my uni projects, explains everything step by step. honestly better than some professors lol", rating: 5 },
+    { name: "Simon C.", role: "Backend dev", text: "Finally an AI that does NOT invent libraries that don't exist. The code just runs. I keep it open all day.", rating: 5 },
+    { name: "Jade M.", role: "Frontend developer", text: "The live code preview is amazing, I see the result instantly. Saved me so much time!", rating: 5 },
+    { name: "Alex T.", role: "High-school student", text: "was scared it'd be the usual slow AI but it's super fast. helped me build the school website in one evening", rating: 5 },
+    { name: "Fred N.", role: "Data engineer", text: "I use Zalvion for scraping and automation scripts. It gets exactly what I want, even when I explain it badly. Highly recommend!!", rating: 5 },
   ],
 };
 
 const STATS = {
   it: [
-    { value: "1.2M+", label: "messaggi generati" },
-    { value: "180+", label: "paesi" },
+    { value: "1.4M+", label: "righe di codice scritte" },
+    { value: "190+", label: "paesi" },
     { value: "4.9/5", label: "valutazione media" },
     { value: "15", label: "lingue" },
   ],
   en: [
-    { value: "1.2M+", label: "messages generated" },
-    { value: "180+", label: "countries" },
+    { value: "1.4M+", label: "lines of code written" },
+    { value: "190+", label: "countries" },
     { value: "4.9/5", label: "average rating" },
     { value: "15", label: "languages" },
   ],
