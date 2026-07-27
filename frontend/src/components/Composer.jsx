@@ -126,7 +126,7 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
         </div>
       </div>
       {listening && <p className="text-center text-xs text-[var(--error)] mt-1.5">{t.listening}</p>}
-      <p className="text-center text-[11px] text-[var(--text-secondary)]/60 mt-2 mb-1">Zalvion AI · Pollinations AI</p>
+      <p className="text-center text-[11px] text-[var(--text-secondary)]/60 mt-2 mb-1">Zalvion AI</p>
     </div>
   );
 }

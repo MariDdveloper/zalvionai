@@ -61,9 +61,9 @@ export default function GetStarted() {
           <div className="mt-8 flex flex-col items-end">
             <span data-testid="signature" className="signature-glow text-3xl sm:text-4xl text-white pr-2"
               style={{ fontFamily: "'Great Vibes', cursive" }}>
-              Mariano Onorati
+              Mari_Developer
             </span>
-            <span className="text-xs text-white/40 mt-1 pr-2">{langCode === "it" ? "Sviluppatore ufficiale · 13 anni" : "Official developer · age 13"}</span>
+            <span className="text-xs text-white/40 mt-1 pr-2">{langCode === "it" ? "Sviluppatore ufficiale" : "Official developer"}</span>
           </div>
         </div>
 
