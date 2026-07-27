@@ -593,7 +593,6 @@ async def logout(request: Request, response: Response):
 # =====================================================================================
 @api_router.post("/ai/generate")
 async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
-    await enforce_and_increment(user)
     lang_name = LANG_NAMES.get(body.language, "English")
     messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
     messages += [{"role": m.role, "content": m.content} for m in body.messages]

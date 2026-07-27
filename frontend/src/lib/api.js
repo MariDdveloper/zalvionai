@@ -55,6 +55,10 @@ export async function saveAssistantMessage(chatId, body) {
   return apiPost(`/chats/${chatId}/messages/assistant`, body);
 }
 
+export async function generateAI(body) {
+  return apiPost(`/ai/generate`, body);
+}
+
 export function streamRegenerate(chatId, payload, handlers) {
   return streamSSE(`${API}/chats/${chatId}/regenerate`, payload, handlers);
 }

@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Menu } from "lucide-react";
 import { toast } from "sonner";
-import { apiGet, apiPost, apiPatch, apiDelete, saveUserMessage, saveAssistantMessage } from "../lib/api";
-import { buildMessages, streamPollinationsText, pollinationsImageUrl } from "../lib/pollinations";
+import { apiGet, apiPost, apiPatch, apiDelete, saveUserMessage, saveAssistantMessage, generateAI } from "../lib/api";
+import { pollinationsImageUrl } from "../lib/pollinations";
 import { getT } from "../lib/i18n";
 import { useAuth } from "../context/AuthContext";
 import Sidebar from "../components/Sidebar";
@@ -138,13 +138,14 @@ export default function ChatApp() {
       return;
     }
 
-    const msgs = buildMessages(historySnapshot, payload.content || "", lang);
-    const { promise, controller } = streamPollinationsText(msgs, {
-      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
-    });
-    controllerRef.current = controller;
+    const convo = [
+      ...historySnapshot.map((m) => ({ role: m.role, content: m.content || (m.type === "image" ? "[immagine generata]" : "") })),
+      { role: "user", content: payload.content || "" },
+    ];
     try {
-      const full = await promise;
+      const res = await generateAI({ messages: convo, language: lang });
+      const full = res.content || "";
+      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: full } : m));
       setBusy(false); setStreamingId(null);
       const arts = parseMessage(full).artifacts;
       if (arts.length) setActiveArtifact(arts[arts.length - 1]);
@@ -152,7 +153,6 @@ export default function ChatApp() {
       loadChats(); checkAuth();
     } catch (e) {
       setBusy(false); setStreamingId(null);
-      if (e.name === "AbortError") return;
       setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Errore di connessione con l'AI. Riprova." } : m));
     }
   };
@@ -168,13 +168,12 @@ export default function ChatApp() {
     setMessages([...base, { id: asstId, role: "assistant", type: "text", content: "" }]);
     setBusy(true);
     setStreamingId(asstId);
-    const msgs = buildMessages(historyForRegen, lastUser.content || "", lang);
-    const { promise, controller } = streamPollinationsText(msgs, {
-      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
-    });
-    controllerRef.current = controller;
+    const convo = historyForRegen.map((m) => ({ role: m.role, content: m.content || (m.type === "image" ? "[immagine generata]" : "") }));
+    convo.push({ role: "user", content: lastUser.content || "" });
     try {
-      const full = await promise;
+      const res = await generateAI({ messages: convo, language: lang });
+      const full = res.content || "";
+      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: full } : m));
       setBusy(false); setStreamingId(null);
       const arts = parseMessage(full).artifacts;
       if (arts.length) setActiveArtifact(arts[arts.length - 1]);
@@ -182,7 +181,6 @@ export default function ChatApp() {
       loadChats();
     } catch (e) {
       setBusy(false); setStreamingId(null);
-      if (e.name === "AbortError") return;
       setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Errore di connessione." } : m));
     }
   };
