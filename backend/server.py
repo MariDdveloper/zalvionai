@@ -204,6 +204,11 @@ class AssistantMsgBody(BaseModel):
     replace_last: bool = False
 
 
+class UserMsgBody(BaseModel):
+    content: str = ""
+    attachments: List[dict] = []
+
+
 class ChatUpdate(BaseModel):
     title: Optional[str] = None
     folder_id: Optional[str] = None
