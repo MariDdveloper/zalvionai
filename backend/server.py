@@ -1,6 +1,5 @@
 import os
 import uuid
-import json
 import base64
 import random
 import hashlib
@@ -12,44 +11,59 @@ from typing import List, Optional
 
 import httpx
 import resend
-import requests
-from urllib.parse import quote
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
-from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
 
-from google import genai
-from google.genai import types
+# Verifica ID token di Google (login Google reale, senza passare da server terzi)
+from google.oauth2 import id_token as google_id_token
+from google.auth.transport import requests as google_auth_requests
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# =====================================================================================
+# CONFIGURAZIONE SUPABASE
+# =====================================================================================
+# Usiamo la SERVICE_ROLE key perché il backend gira lato server: bypassa le Row Level
+# Security (RLS) delle tabelle, quindi è il client "amministrativo". NON va MAI esposta
+# al frontend/browser: resta solo nel file .env del backend.
+SUPABASE_URL = os.environ['SUPABASE_URL']
+SUPABASE_SERVICE_KEY = os.environ['SUPABASE_SERVICE_KEY']
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+# =====================================================================================
+# ALTRE CONFIGURAZIONI
+# =====================================================================================
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
-SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'onboarding@resend.dev')
+SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'noreply@getzalvion.com')
 resend.api_key = RESEND_API_KEY
 
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-TEXT_MODEL = "gemini-2.5-flash"
-IMAGE_MODEL = "gemini-2.5-flash-image"
+# Login Google reale: Client ID del progetto Google Cloud (OAuth consent screen)
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 
-# ---- Pollinations AI (free, keyless, stateless) ----
-POLLINATIONS_TEXT_URL = "https://text.pollinations.ai/openai"
+# ---- Mistral AI (unico provider di testo attivo) ----
+MISTRAL_API_KEY = os.environ.get('MISTRAL_API_KEY')
+MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-latest')
+# Altri model id validi: "mistral-small-latest" (più economico/veloce),
+# "open-mistral-nemo", "codestral-latest" (specializzato su codice).
+
+# ---- Pollinations AI (SOLO generazione immagini — l'endpoint testuale non si usa più) ----
 POLLINATIONS_IMAGE_URL = "https://image.pollinations.ai/prompt/"
-POLLINATIONS_TEXT_MODEL = "openai"
-POLLINATIONS_IMAGE_MODEL = "flux"
-POLLINATIONS_REFERRER = "zalvionai.com"
+POLLINATIONS_REFERRER = os.environ.get('POLLINATIONS_REFERRER', 'https://claus-ai.preview.emergentagent.com')
+POLLINATIONS_TOKEN = os.environ.get('POLLINATIONS_TOKEN')  # opzionale, se hai un token Pollinations
+
+# ---- AWS Bedrock / DeepSeek: PREDISPOSTO MA NON ATTIVO ----
+# Il flag use_aws_fallback esiste già nell'endpoint di generazione, ma la funzione
+# call_deepseek_bedrock() sotto è solo un placeholder finché non mi dai le credenziali
+# AWS IAM e confermi il model id da usare (es. "deepseek.v3.2" su Bedrock).
+AWS_BEDROCK_ENABLED = False
 
 PAYPAL_MODE = os.environ.get('PAYPAL_MODE', 'sandbox')
 PAYPAL_CLIENT_ID = os.environ.get('PAYPAL_CLIENT_ID', '')
 PAYPAL_SECRET = os.environ.get('PAYPAL_SECRET', '')
-PAYPAL_WEBHOOK_ID = os.environ.get('PAYPAL_WEBHOOK_ID', '')
 PAYPAL_BASE = "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == 'sandbox' else "https://api-m.paypal.com"
 
 FREE_DAILY_LIMIT = 10
@@ -101,7 +115,9 @@ SYSTEM_PROMPT = (
 )
 
 
-# ---------- Models ----------
+# =====================================================================================
+# MODELLI Pydantic
+# =====================================================================================
 class OTPRequest(BaseModel):
     email: EmailStr
 
@@ -109,6 +125,10 @@ class OTPRequest(BaseModel):
 class OTPVerify(BaseModel):
     email: EmailStr
     code: str
+
+
+class GoogleTokenBody(BaseModel):
+    credential: str  # JWT restituito dal pulsante "Sign in with Google" (Google Identity Services)
 
 
 class User(BaseModel):
@@ -120,18 +140,150 @@ class User(BaseModel):
     subscription_id: Optional[str] = None
     plan_type: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+class GoogleSessionPayload(BaseModel):
+    session_id: str
+
+@app.post("/api/auth/google/session")
+async def verify_google_session_endpoint(payload: GoogleSessionPayload):
+    try:
+        if not payload.session_id:
+            raise HTTPException(status_code=400, detail="Session ID richiesto")
+            
+        # Richiamo corretto per il client Supabase Python
+        try:
+            user_response = supabase.auth.admin.get_user_by_id(payload.session_id)
+        except Exception as auth_err:
+            logging.error(f"Errore diretto da Supabase Auth: {str(auth_err)}")
+            raise HTTPException(status_code=401, detail="Sessione non riconosciuta da Supabase")
+        
+        if not user_response or not hasattr(user_response, 'user'):
+            raise HTTPException(status_code=401, detail="Sessione non valida o scaduta")
+            
+        # Genera la struttura JSON pulita attesa dal client di React
+        return {
+            "session": {
+                "access_token": payload.session_id,
+                "token_type": "bearer",
+                "user": {
+                    "id": str(user_data.user.id) if hasattr(user_data.user, 'id') else user_data.user.get('id'),
+                    "email": user_data.user.email if hasattr(user_data.user, 'email') else user_data.user.get('email')
+                }
+            },
+            "authenticated": True
+        }
+    except HTTPException as http_err:
+        raise http_err
+    except Exception as e:
+        logging.error(f"Crash interno del server: {str(e)}")
+        raise HTTPException(status_code=500, detail="Errore di elaborazione interna")
 
 
-class ChatStreamBody(BaseModel):
-    content: str = ""
-    images: List[str] = []
-    files: List[dict] = []
-    mode: str = "chat"          # chat | image
-    web: bool = True
+class ChatMessageIn(BaseModel):
+    role: str
+    content: str
+
+
+class ChatGenerateBody(BaseModel):
+    messages: List[ChatMessageIn]
     language: str = "en"
+    use_aws_fallback: bool = False  # switch manuale: True = passa a DeepSeek su AWS (non ancora attivo)
 
 
-# ---------- Helpers ----------
+class ImageGenerateBody(BaseModel):
+    prompt: str
+    width: int = 768
+    height: int = 768
+    content: str = ""
+    attachments: List[dict] = []
+
+
+class AssistantMsgBody(BaseModel):
+    content: str = ""
+    type: str = "text"
+    image_url: str = ""
+    replace_last: bool = False
+
+
+class ChatUpdate(BaseModel):
+    title: Optional[str] = None
+    folder_id: Optional[str] = None
+    clear_folder: bool = False
+
+
+class FolderBody(BaseModel):
+    name: str
+
+
+class ActivateBody(BaseModel):
+    subscription_id: str
+    plan_type: str = "monthly"
+
+
+# =====================================================================================
+# HELPER GENERICI SUPABASE
+# =====================================================================================
+# Il client supabase-py e' sincrono: ogni chiamata viene eseguita in un thread separato
+# con asyncio.to_thread per non bloccare il event loop di FastAPI.
+
+async def sb_select_one(table: str, **filters) -> Optional[dict]:
+    def _run():
+        q = supabase.table(table).select("*")
+        for k, v in filters.items():
+            q = q.eq(k, v)
+        res = q.limit(1).execute()
+        return res.data[0] if res.data else None
+    return await asyncio.to_thread(_run)
+
+
+async def sb_select(table: str, columns: str = "*", order_by: Optional[str] = None,
+                    desc: bool = True, limit: int = 500, **filters) -> list:
+    def _run():
+        q = supabase.table(table).select(columns)
+        for k, v in filters.items():
+            q = q.eq(k, v)
+        if order_by:
+            q = q.order(order_by, desc=desc)
+        q = q.limit(limit)
+        return q.execute().data
+    return await asyncio.to_thread(_run)
+
+
+async def sb_insert(table: str, doc: dict) -> dict:
+    def _run():
+        res = supabase.table(table).insert(doc).execute()
+        return res.data[0] if res.data else doc
+    return await asyncio.to_thread(_run)
+
+
+async def sb_update(table: str, values: dict, **filters):
+    def _run():
+        q = supabase.table(table).update(values)
+        for k, v in filters.items():
+            q = q.eq(k, v)
+        return q.execute()
+    return await asyncio.to_thread(_run)
+
+
+async def sb_delete(table: str, **filters):
+    def _run():
+        q = supabase.table(table).delete()
+        for k, v in filters.items():
+            q = q.eq(k, v)
+        return q.execute()
+    return await asyncio.to_thread(_run)
+
+
+async def sb_upsert(table: str, doc: dict, on_conflict: Optional[str] = None):
+    def _run():
+        if on_conflict:
+            return supabase.table(table).upsert(doc, on_conflict=on_conflict).execute()
+        return supabase.table(table).upsert(doc).execute()
+    return await asyncio.to_thread(_run)
+
+
+# =====================================================================================
+# HELPER GENERALI
+# =====================================================================================
 def now_utc():
     return datetime.now(timezone.utc)
 
@@ -140,17 +292,9 @@ def hash_code(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
 
 
-def detect_mime(b64: str) -> str:
-    if b64.startswith('iVBOR'): return 'image/png'
-    if b64.startswith('/9j/'): return 'image/jpeg'
-    if b64.startswith('R0lGOD'): return 'image/gif'
-    if b64.startswith('UklGR'): return 'image/webp'
-    return 'image/png'
-
-
 async def create_session(user_id: str) -> str:
     token = uuid.uuid4().hex + uuid.uuid4().hex
-    await db.user_sessions.insert_one({
+    await sb_insert("user_sessions", {
         "user_id": user_id, "session_token": token,
         "expires_at": (now_utc() + timedelta(days=7)).isoformat(),
         "created_at": now_utc().isoformat(),
@@ -171,7 +315,7 @@ async def get_current_user(request: Request) -> User:
             token = auth[7:]
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    session = await sb_select_one("user_sessions", session_token=token)
     if not session:
         raise HTTPException(status_code=401, detail="Invalid session")
     expires_at = session["expires_at"]
@@ -181,21 +325,21 @@ async def get_current_user(request: Request) -> User:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at < now_utc():
         raise HTTPException(status_code=401, detail="Session expired")
-    user_doc = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
+    user_doc = await sb_select_one("users", user_id=session["user_id"])
     if not user_doc:
         raise HTTPException(status_code=401, detail="User not found")
     return User(**user_doc)
 
 
 async def upsert_user(email: str, name: str, picture: Optional[str] = None) -> User:
-    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    existing = await sb_select_one("users", email=email)
     if existing:
         return User(**existing)
     user = User(user_id=f"user_{uuid.uuid4().hex[:12]}", email=email,
                 name=name or email.split("@")[0], picture=picture, plan="free")
     doc = user.model_dump()
     doc["created_at"] = doc["created_at"].isoformat()
-    await db.users.insert_one(doc)
+    await sb_insert("users", doc)
     return user
 
 
@@ -203,13 +347,44 @@ def daily_limit_for(plan: str) -> int:
     return PRO_DAILY_LIMIT if plan == "pro" else FREE_DAILY_LIMIT
 
 
+async def get_usage_today(user_id: str) -> int:
+    today = date.today().isoformat()
+    doc = await sb_select_one("usage", user_id=user_id, date=today)
+    return doc["count"] if doc else 0
+
+
+async def enforce_and_increment(user: User):
+    today = date.today().isoformat()
+    existing = await sb_select_one("usage", user_id=user.user_id, date=today)
+    used = existing["count"] if existing else 0
+    if used >= daily_limit_for(user.plan):
+        raise HTTPException(status_code=402, detail="daily_limit_reached")
+    if existing:
+        await sb_update("usage", {"count": used + 1}, user_id=user.user_id, date=today)
+    else:
+        await sb_insert("usage", {"user_id": user.user_id, "date": today, "count": 1})
+
+
+async def append_chat_message(chat_id: str, user_id: str, message: dict,
+                              new_title: Optional[str] = None, replace_last: bool = False) -> dict:
+    """Aggiunge un messaggio all'array jsonb 'messages' di una chat (equivalente del $push Mongo)."""
+    chat = await sb_select_one("chats", chat_id=chat_id, user_id=user_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    messages = list(chat.get("messages") or [])
+    if replace_last and messages and messages[-1].get("role") == "assistant":
+        messages.pop()
+    messages.append(message)
+    update = {"messages": messages, "updated_at": now_utc().isoformat()}
+    if new_title is not None:
+        update["title"] = new_title
+    await sb_update("chats", update, chat_id=chat_id)
+    return chat
+
+
 IMAGE_QUOTA_MSG = {
     "it": "🎨 **Oggi abbiamo raggiunto il limite di generazione immagini!**\n\nLe nostre GPU creative stanno prendendo fiato dopo aver disegnato tantissimo. Riprova tra poco ✨\n\nNel frattempo posso aiutarti con testo, codice, idee e analisi — chiedimi pure!",
     "en": "🎨 **We've hit today's image generation limit!**\n\nOur creative GPUs are catching their breath after a lot of drawing. Please try again shortly ✨\n\nIn the meantime I can help you with text, code, ideas and analysis — just ask!",
-    "es": "🎨 **¡Hemos alcanzado el límite de generación de imágenes de hoy!**\n\nNuestras GPU creativas están tomando aire. Vuelve a intentarlo en un momento ✨\n\nMientras tanto puedo ayudarte con texto, código e ideas.",
-    "fr": "🎨 **Nous avons atteint la limite de génération d'images du jour !**\n\nNos GPU créatifs reprennent leur souffle. Réessaie dans un instant ✨\n\nEn attendant, je peux t'aider avec du texte, du code et des idées.",
-    "de": "🎨 **Wir haben das heutige Limit für die Bildgenerierung erreicht!**\n\nUnsere kreativen GPUs holen kurz Luft. Bitte versuche es gleich noch einmal ✨\n\nIn der Zwischenzeit helfe ich dir gern mit Text, Code und Ideen.",
-    "pt": "🎨 **Atingimos o limite de geração de imagens de hoje!**\n\nAs nossas GPUs criativas estão a recuperar o fôlego. Tenta novamente daqui a pouco ✨\n\nEntretanto posso ajudar-te com texto, código e ideias.",
 }
 
 
@@ -217,27 +392,115 @@ def image_quota_message(lang: str) -> str:
     return IMAGE_QUOTA_MSG.get(lang, IMAGE_QUOTA_MSG["en"])
 
 
-async def get_usage_today(user_id: str) -> int:
-    today = date.today().isoformat()
-    doc = await db.usage.find_one({"user_id": user_id, "date": today}, {"_id": 0})
-    return doc["count"] if doc else 0
+# =====================================================================================
+# PROVIDER AI: MISTRAL AI (attivo) + BEDROCK/DEEPSEEK (predisposto, non attivo)
+# =====================================================================================
+MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
-async def enforce_and_increment(user: User):
-    today = date.today().isoformat()
-    used = await get_usage_today(user.user_id)
-    if used >= daily_limit_for(user.plan):
-        raise HTTPException(status_code=402, detail="daily_limit_reached")
-    await db.usage.update_one({"user_id": user.user_id, "date": today},
-                              {"$inc": {"count": 1}}, upsert=True)
+async def call_mistral(messages: List[dict], timeout: float = 60.0, max_retries: int = 3) -> str:
+    """
+    Chiama l'API ufficiale di Mistral AI (non Pollinations). E' l'UNICO provider attivo
+    di default: nessun fallback automatico verso altri provider in caso di errore.
+    Include un retry con backoff sui 429/502/503/504.
+    """
+    if not MISTRAL_API_KEY:
+        raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
+    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
+    payload = {"model": MISTRAL_MODEL, "messages": messages}
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(MISTRAL_API_URL, json=payload, headers=headers)
+            if r.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
+                await asyncio.sleep(3 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return data["choices"][0]["message"]["content"]
+        except (httpx.HTTPStatusError, httpx.RequestError, KeyError, IndexError, TypeError) as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                await asyncio.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"Mistral AI non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
-# ---------- Auth: Email OTP ----------
+async def call_pollinations_image(prompt: str, timeout: float = 90.0, max_retries: int = 3,
+                                  width: int = 768, height: int = 768, model: str = "flux"):
+    """
+    Genera un'immagine con Pollinations (gratuito, senza chiave). Restituisce
+    (bytes, content_type). Include retry con backoff sui 502/503/504, tipici di
+    un servizio gratuito senza SLA.
+    """
+    import urllib.parse
+    headers = {"Referer": POLLINATIONS_REFERRER}
+    if POLLINATIONS_TOKEN:
+        headers["Authorization"] = f"Bearer {POLLINATIONS_TOKEN}"
+    url = POLLINATIONS_IMAGE_URL + urllib.parse.quote(prompt)
+    params = {"width": width, "height": height, "model": model, "nologo": "true"}
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(url, params=params, headers=headers)
+            if r.status_code in (502, 503, 504) and attempt < max_retries - 1:
+                await asyncio.sleep(3 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            content_type = r.headers.get("Content-Type", "")
+            if not content_type.startswith("image/"):
+                raise RuntimeError(f"Risposta non e' un'immagine (Content-Type: {content_type})")
+            return r.content, content_type
+        except (httpx.HTTPStatusError, httpx.RequestError, RuntimeError) as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                await asyncio.sleep(3 * (attempt + 1))
+    raise RuntimeError(f"Pollinations (immagini) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+
+
+async def call_deepseek_bedrock(messages: List[dict]) -> str:
+    """
+    PLACEHOLDER — non ancora attivo.
+    Verra' implementato con boto3 (bedrock-runtime, API Converse) quando mi darai le
+    credenziali IAM (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION) e confermerai
+    il model id Bedrock da usare (es. "deepseek.v3.2" — "DeepSeek v4 Flash" non esiste
+    ad oggi nel catalogo Bedrock).
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="Il provider AWS Bedrock/DeepSeek non e' ancora attivo. "
+               "Resta disponibile solo Mistral AI finche' non viene configurato."
+    )
+
+
+async def generate_ai_response(messages: List[dict], use_aws_fallback: bool = False) -> str:
+    """
+    Dispatcher centrale. Lo switch verso AWS e' SOLO manuale (parametro use_aws_fallback):
+    nessun automatismo nel blocco except di Mistral.
+    """
+    if use_aws_fallback:
+        if not AWS_BEDROCK_ENABLED:
+            raise HTTPException(status_code=501, detail="AWS Bedrock non e' ancora attivo su questo backend.")
+        return await call_deepseek_bedrock(messages)
+
+    try:
+        return await call_mistral(messages)
+    except Exception as e:
+        logger.error(f"Mistral AI error: {e}")
+        raise HTTPException(status_code=502, detail="Errore nella generazione con Mistral AI")
+
+
+# =====================================================================================
+# AUTH: OTP via email
+# =====================================================================================
 @api_router.post("/auth/otp/request")
 async def request_otp(body: OTPRequest):
     code = f"{random.randint(0, 999999):06d}"
-    await db.otps.delete_many({"email": body.email})
-    await db.otps.insert_one({
+    await sb_delete("otps", email=body.email)
+    await sb_insert("otps", {
         "email": body.email, "code_hash": hash_code(code),
         "expires_at": (now_utc() + timedelta(minutes=10)).isoformat(),
         "created_at": now_utc().isoformat(),
@@ -262,7 +525,7 @@ async def request_otp(body: OTPRequest):
 
 @api_router.post("/auth/otp/verify")
 async def verify_otp(body: OTPVerify, response: Response):
-    otp = await db.otps.find_one({"email": body.email}, {"_id": 0})
+    otp = await sb_select_one("otps", email=body.email)
     if not otp:
         raise HTTPException(status_code=400, detail="No code requested for this email")
     expires_at = datetime.fromisoformat(otp["expires_at"])
@@ -272,36 +535,32 @@ async def verify_otp(body: OTPVerify, response: Response):
         raise HTTPException(status_code=400, detail="Code expired, request a new one")
     if otp["code_hash"] != hash_code(body.code.strip()):
         raise HTTPException(status_code=400, detail="Invalid code")
-    await db.otps.delete_many({"email": body.email})
+    await sb_delete("otps", email=body.email)
     user = await upsert_user(body.email, body.email.split("@")[0])
     token = await create_session(user.user_id)
     set_session_cookie(response, token)
     return {"user": user.model_dump(), "token": token}
 
 
-# ---------- Auth: Google via Emergent ----------
-@api_router.post("/auth/google/session")
-async def google_session(request: Request, response: Response):
-    session_id = request.headers.get("X-Session-ID")
-    if not session_id:
-        raise HTTPException(status_code=400, detail="Missing session id")
+# =====================================================================================
+# AUTH: Google (verifica reale dell'ID token, nessun server terzo)
+# =====================================================================================
+@api_router.post("/auth/google/verify")
+async def google_verify(body: GoogleTokenBody, response: Response):
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID non configurato sul backend")
     try:
-        r = await asyncio.to_thread(
-            requests.get, "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-            headers={"X-Session-ID": session_id}, timeout=15,
+        idinfo = await asyncio.to_thread(
+            google_id_token.verify_oauth2_token,
+            body.credential, google_auth_requests.Request(), GOOGLE_CLIENT_ID,
         )
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        logger.error(f"Emergent auth failed: {e}")
-        raise HTTPException(status_code=401, detail="Google authentication failed")
-    user = await upsert_user(data["email"], data.get("name", ""), data.get("picture"))
-    token = data.get("session_token") or await create_session(user.user_id)
-    await db.user_sessions.update_one(
-        {"session_token": token},
-        {"$set": {"user_id": user.user_id, "session_token": token,
-                  "expires_at": (now_utc() + timedelta(days=7)).isoformat(),
-                  "created_at": now_utc().isoformat()}}, upsert=True)
+    except ValueError as e:
+        logger.warning(f"Google token non valido: {e}")
+        raise HTTPException(status_code=401, detail="Token Google non valido")
+    if not idinfo.get("email_verified", False):
+        raise HTTPException(status_code=401, detail="Email Google non verificata")
+    user = await upsert_user(idinfo["email"], idinfo.get("name", ""), idinfo.get("picture"))
+    token = await create_session(user.user_id)
     set_session_cookie(response, token)
     return {"user": user.model_dump(), "token": token}
 
@@ -319,16 +578,160 @@ async def auth_me(user: User = Depends(get_current_user)):
 async def logout(request: Request, response: Response):
     token = request.cookies.get("session_token")
     if token:
-        await db.user_sessions.delete_one({"session_token": token})
+        await sb_delete("user_sessions", session_token=token)
     response.delete_cookie("session_token", path="/")
     return {"status": "ok"}
 
 
-# ---------- Chats ----------
+# =====================================================================================
+# GENERAZIONE AI (endpoint usato dal frontend per parlare col modello)
+# =====================================================================================
+@api_router.post("/ai/generate")
+async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
+    await enforce_and_increment(user)
+    lang_name = LANG_NAMES.get(body.language, "English")
+    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
+    messages += [{"role": m.role, "content": m.content} for m in body.messages]
+    content = await generate_ai_response(messages, use_aws_fallback=body.use_aws_fallback)
+    used = await get_usage_today(user.user_id)
+    return {
+        "content": content,
+        "provider": "aws-bedrock-deepseek" if body.use_aws_fallback else "mistral",
+        "usage_used": used,
+        "usage_limit": daily_limit_for(user.plan),
+    }
+
+
+@api_router.get("/ai/test-mistral")
+async def test_mistral():
+    """
+    Sessione di test approfondita su Mistral AI: verifica che il provider risponda
+    correttamente su casi diversi (testo semplice, ragionamento, codice, multilingua,
+    contesto multi-turno). Nessuna scrittura su Supabase, endpoint pensato per
+    debug/monitoraggio manuale.
+
+    NB: l'API di Mistral e' testuale (chat completions) e non include generazione
+    immagini — per quella serve un provider separato (es. Stability, Flux via altro
+    servizio, DALL-E, ecc.); fammi sapere se vuoi che lo aggiunga.
+    """
+    cases = [
+        {
+            "name": "risposta_semplice",
+            "messages": [{"role": "user", "content": "Rispondi con una sola parola: 'ok'."}],
+        },
+        {
+            "name": "ragionamento_matematico",
+            "messages": [{"role": "user", "content": "Un treno viaggia a 80 km/h per 2 ore e mezza. "
+                                                      "Quanti km percorre? Spiega il calcolo passo passo."}],
+        },
+        {
+            "name": "generazione_codice",
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT.format(lang="Italian")},
+                        {"role": "user", "content": "Scrivi una funzione Python che calcola il fattoriale, "
+                                                    "gestendo input negativi con un'eccezione."}],
+        },
+        {
+            "name": "supporto_multilingua_it",
+            "messages": [{"role": "system", "content": SYSTEM_PROMPT.format(lang="Italian")},
+                        {"role": "user", "content": "Ciao, chi sei?"}],
+        },
+        {
+            "name": "contesto_multi_turno",
+            "messages": [
+                {"role": "user", "content": "Ricordami questo numero: 4471."},
+                {"role": "assistant", "content": "Ok, ricordo 4471."},
+                {"role": "user", "content": "Qual era il numero che ti ho dato? Rispondi solo col numero."},
+            ],
+        },
+    ]
+
+    results = []
+    for case in cases:
+        started = now_utc()
+        try:
+            content = await call_mistral(case["messages"], timeout=45.0)
+            elapsed = (now_utc() - started).total_seconds()
+            results.append({
+                "test": case["name"], "status": "ok", "elapsed_seconds": round(elapsed, 2),
+                "response_preview": content[:200],
+            })
+        except Exception as e:
+            elapsed = (now_utc() - started).total_seconds()
+            results.append({
+                "test": case["name"], "status": "error", "elapsed_seconds": round(elapsed, 2),
+                "error": str(e),
+            })
+
+    passed = sum(1 for r in results if r["status"] == "ok")
+    return {
+        "provider": "mistral",
+        "model": MISTRAL_MODEL,
+        "endpoint": MISTRAL_API_URL,
+        "tests_total": len(results),
+        "tests_passed": passed,
+        "tests_failed": len(results) - passed,
+        "all_passed": passed == len(results),
+        "results": results,
+        "note": "Mistral non genera immagini: per quello serve un provider separato.",
+    }
+
+
+@api_router.post("/ai/generate-image")
+async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_current_user)):
+    """
+    Genera un'immagine con Pollinations AI (gratuito). Restituisce l'immagine come
+    data URL base64, cosi' il frontend puo' mostrarla subito senza un secondo giro
+    di rete e senza dover ospitare il file da nessuna parte.
+    """
+    await enforce_and_increment(user)
+    try:
+        content, content_type = await call_pollinations_image(
+            body.prompt, width=body.width, height=body.height)
+    except Exception as e:
+        logger.error(f"Pollinations image error: {e}")
+        lang = "it"  # fallback semplice; il frontend puo' passare la lingua se serve differenziare
+        raise HTTPException(status_code=502, detail=image_quota_message(lang))
+    b64 = base64.b64encode(content).decode()
+    used = await get_usage_today(user.user_id)
+    return {
+        "image_url": f"data:{content_type};base64,{b64}",
+        "usage_used": used,
+        "usage_limit": daily_limit_for(user.plan),
+    }
+
+
+@api_router.get("/ai/test-pollinations-image")
+async def test_pollinations_image():
+    """
+    Test rapido della generazione immagini via Pollinations. Nessuna scrittura su
+    Supabase, endpoint pensato per debug/monitoraggio manuale (nessuna auth
+    richiesta per semplicita' di verifica).
+    """
+    started = now_utc()
+    try:
+        content, content_type = await call_pollinations_image(
+            "a red apple on a wooden table, photorealistic")
+        elapsed = (now_utc() - started).total_seconds()
+        return {
+            "provider": "pollinations", "endpoint": POLLINATIONS_IMAGE_URL,
+            "status": "ok", "elapsed_seconds": round(elapsed, 2),
+            "content_type": content_type, "size_bytes": len(content),
+        }
+    except Exception as e:
+        elapsed = (now_utc() - started).total_seconds()
+        return {
+            "provider": "pollinations", "endpoint": POLLINATIONS_IMAGE_URL,
+            "status": "error", "elapsed_seconds": round(elapsed, 2), "error": str(e),
+        }
+
+
+# =====================================================================================
+# CHATS
+# =====================================================================================
 @api_router.get("/chats")
 async def list_chats(user: User = Depends(get_current_user)):
-    chats = await db.chats.find({"user_id": user.user_id}, {"_id": 0, "messages": 0}).sort("updated_at", -1).to_list(500)
-    return chats
+    return await sb_select("chats", columns="chat_id,user_id,title,folder_id,created_at,updated_at",
+                           order_by="updated_at", desc=True, user_id=user.user_id)
 
 
 @api_router.post("/chats")
@@ -336,15 +739,9 @@ async def create_chat(user: User = Depends(get_current_user)):
     chat = {"chat_id": f"chat_{uuid.uuid4().hex[:12]}", "user_id": user.user_id,
             "title": "New chat", "folder_id": None, "messages": [],
             "created_at": now_utc().isoformat(), "updated_at": now_utc().isoformat()}
-    await db.chats.insert_one(chat)
-    chat.pop("_id", None); chat.pop("messages", None)
+    await sb_insert("chats", chat)
+    chat.pop("messages", None)
     return chat
-
-
-class ChatUpdate(BaseModel):
-    title: Optional[str] = None
-    folder_id: Optional[str] = None
-    clear_folder: bool = False
 
 
 @api_router.patch("/chats/{chat_id}")
@@ -356,276 +753,139 @@ async def update_chat(chat_id: str, body: ChatUpdate, user: User = Depends(get_c
         update["folder_id"] = None
     elif body.folder_id is not None:
         update["folder_id"] = body.folder_id
-    res = await db.chats.update_one({"chat_id": chat_id, "user_id": user.user_id}, {"$set": update})
-    if res.matched_count == 0:
+    existing = await sb_select_one("chats", chat_id=chat_id, user_id=user.user_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Chat not found")
+    await sb_update("chats", update, chat_id=chat_id)
     return {"status": "ok"}
 
 
 @api_router.delete("/chats/{chat_id}")
 async def delete_chat(chat_id: str, user: User = Depends(get_current_user)):
-    await db.chats.delete_one({"chat_id": chat_id, "user_id": user.user_id})
+    await sb_delete("chats", chat_id=chat_id, user_id=user.user_id)
     return {"status": "ok"}
 
 
-# ---------- Folders ----------
-class FolderBody(BaseModel):
-    name: str
+@api_router.get("/chats/{chat_id}/messages")
+async def get_messages(chat_id: str, user: User = Depends(get_current_user)):
+    chat = await sb_select_one("chats", chat_id=chat_id, user_id=user.user_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"messages": chat.get("messages", []), "title": chat.get("title")}
 
 
+@api_router.post("/chats/{chat_id}/messages/user")
+async def add_user_message(chat_id: str, body: UserMsgBody, user: User = Depends(get_current_user)):
+    chat = await sb_select_one("chats", chat_id=chat_id, user_id=user.user_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    await enforce_and_increment(user)
+    user_msg = {"id": uuid.uuid4().hex, "role": "user", "type": "text",
+                "content": body.content, "attachments": body.attachments,
+                "created_at": now_utc().isoformat()}
+    new_title = chat["title"]
+    if chat["title"] == "New chat" and body.content:
+        new_title = body.content[:48]
+    await append_chat_message(chat_id, user.user_id, user_msg, new_title=new_title)
+    used = await get_usage_today(user.user_id)
+    return {"ok": True, "title": new_title, "usage_used": used, "usage_limit": daily_limit_for(user.plan)}
+
+
+@api_router.post("/chats/{chat_id}/messages/assistant")
+async def add_assistant_message(chat_id: str, body: AssistantMsgBody, user: User = Depends(get_current_user)):
+    chat = await sb_select_one("chats", chat_id=chat_id, user_id=user.user_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    assistant_msg = {"id": uuid.uuid4().hex, "role": "assistant", "type": body.type,
+                     "content": body.content, "image_url": body.image_url,
+                     "created_at": now_utc().isoformat()}
+    await append_chat_message(chat_id, user.user_id, assistant_msg, replace_last=body.replace_last)
+    return {"ok": True}
+
+
+# =====================================================================================
+# FOLDERS
+# =====================================================================================
 @api_router.get("/folders")
 async def list_folders(user: User = Depends(get_current_user)):
-    return await db.folders.find({"user_id": user.user_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return await sb_select("folders", order_by="created_at", desc=False, user_id=user.user_id)
 
 
 @api_router.post("/folders")
 async def create_folder(body: FolderBody, user: User = Depends(get_current_user)):
     folder = {"folder_id": f"folder_{uuid.uuid4().hex[:12]}", "user_id": user.user_id,
               "name": (body.name.strip() or "New folder")[:60], "created_at": now_utc().isoformat()}
-    await db.folders.insert_one(folder)
-    folder.pop("_id", None)
+    await sb_insert("folders", folder)
     return folder
 
 
 @api_router.patch("/folders/{folder_id}")
 async def rename_folder(folder_id: str, body: FolderBody, user: User = Depends(get_current_user)):
-    res = await db.folders.update_one({"folder_id": folder_id, "user_id": user.user_id},
-                                      {"$set": {"name": (body.name.strip() or "New folder")[:60]}})
-    if res.matched_count == 0:
+    existing = await sb_select_one("folders", folder_id=folder_id, user_id=user.user_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Folder not found")
+    await sb_update("folders", {"name": (body.name.strip() or "New folder")[:60]}, folder_id=folder_id)
     return {"status": "ok"}
 
 
 @api_router.delete("/folders/{folder_id}")
 async def delete_folder(folder_id: str, user: User = Depends(get_current_user)):
-    await db.folders.delete_one({"folder_id": folder_id, "user_id": user.user_id})
-    await db.chats.update_many({"user_id": user.user_id, "folder_id": folder_id}, {"$set": {"folder_id": None}})
+    await sb_delete("folders", folder_id=folder_id, user_id=user.user_id)
+    chats_in_folder = await sb_select("chats", columns="chat_id", user_id=user.user_id, folder_id=folder_id)
+    for c in chats_in_folder:
+        await sb_update("chats", {"folder_id": None}, chat_id=c["chat_id"])
     return {"status": "ok"}
 
 
-@api_router.get("/chats/{chat_id}/messages")
-async def get_messages(chat_id: str, user: User = Depends(get_current_user)):
-    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    return {"messages": chat.get("messages", []), "title": chat.get("title")}
-
-
-# ---------- Pollinations helpers ----------
-def build_messages(history, user_text, lang_name):
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
-    for m in history:
-        role = "user" if m["role"] == "user" else "assistant"
-        txt = m.get("content", "") or " "
-        if m.get("type") == "image":
-            txt = txt or "[generated an image]"
-        msgs.append({"role": role, "content": txt})
-    msgs.append({"role": "user", "content": user_text or " "})
-    return msgs
-
-
-async def pollinations_text_stream(messages):
-    payload = {"model": POLLINATIONS_TEXT_MODEL, "messages": messages,
-               "stream": True, "referrer": POLLINATIONS_REFERRER}
-    token = os.environ.get("POLLINATIONS_TOKEN")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    last_err = None
-    for attempt in range(2):
-        got_any = False
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
-                async with client.stream("POST", POLLINATIONS_TEXT_URL, json=payload, headers=headers) as resp:
-                    if resp.status_code >= 400:
-                        await resp.aread()
-                        raise httpx.HTTPStatusError(f"status {resp.status_code}", request=resp.request, response=resp)
-                    async for line in resp.aiter_lines():
-                        if not line or not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
-                            return
-                        try:
-                            obj = json.loads(data)
-                            delta = obj["choices"][0].get("delta", {}).get("content")
-                        except Exception:
-                            continue
-                        if delta:
-                            got_any = True
-                            yield delta
-            if got_any:
-                return
-        except Exception as e:
-            last_err = e
-            logger.warning(f"Pollinations attempt {attempt + 1} failed: {e}")
-        await asyncio.sleep(1.2 * (attempt + 1))
-    if last_err:
-        raise last_err
-
-
-def pollinations_image_url(prompt: str) -> str:
-    seed = random.randint(1, 10 ** 9)
-    return (f"{POLLINATIONS_IMAGE_URL}{quote(prompt or 'a beautiful high quality image')}"
-            f"?width=1024&height=1024&seed={seed}&model={POLLINATIONS_IMAGE_MODEL}"
-            f"&nologo=true&referrer={POLLINATIONS_REFERRER}")
-
-
-# ---------- Chat stream ----------
-@api_router.post("/chats/{chat_id}/stream")
-async def stream_chat(chat_id: str, body: ChatStreamBody, user: User = Depends(get_current_user)):
-    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    await enforce_and_increment(user)
-
-    history = chat.get("messages", [])
-    lang_name = LANG_NAMES.get(body.language, "English")
-
-    user_text = body.content or ""
-    for f in body.files:
-        if f.get("text"):
-            user_text += f"\n\n[Attached file: {f.get('name','file')}]\n{f['text']}"
-
-    user_msg = {"id": uuid.uuid4().hex, "role": "user", "type": "text", "content": body.content,
-                "attachments": [{"name": f.get("name"), "kind": "file"} for f in body.files]
-                               + [{"kind": "image"} for _ in body.images],
-                "created_at": now_utc().isoformat()}
-    new_title = chat["title"]
-    if chat["title"] == "New chat" and body.content:
-        new_title = body.content[:48]
-
-    # ----- IMAGE MODE (Pollinations) -----
-    if body.mode == "image":
-        async def image_gen():
-            url = pollinations_image_url(body.content or "")
-            assistant_msg = {"id": uuid.uuid4().hex, "role": "assistant", "type": "image",
-                             "content": "", "image_url": url, "created_at": now_utc().isoformat()}
-            yield f"data: {json.dumps({'type': 'image', 'url': url, 'text': ''})}\n\n"
-            await db.chats.update_one({"chat_id": chat_id},
-                {"$push": {"messages": {"$each": [user_msg, assistant_msg]}},
-                 "$set": {"updated_at": now_utc().isoformat(), "title": new_title}})
-            yield f"data: {json.dumps({'type': 'done', 'title': new_title})}\n\n"
-
-        return StreamingResponse(image_gen(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-    # ----- CHAT MODE (Pollinations) -----
-    messages = build_messages(history, user_text, lang_name)
-
-    async def text_gen():
-        assistant_text = []
-        try:
-            async for piece in pollinations_text_stream(messages):
-                assistant_text.append(piece)
-                yield f"data: {json.dumps({'type': 'delta', 'content': piece})}\n\n"
-        except Exception as e:
-            logger.error(f"Pollinations stream error: {e}")
-            if not assistant_text:
-                msg = "Sorry, the AI service is briefly unavailable. Please try again."
-                assistant_text.append(msg)
-                yield f"data: {json.dumps({'type': 'delta', 'content': msg})}\n\n"
-        full = "".join(assistant_text)
-        assistant_msg = {"id": uuid.uuid4().hex, "role": "assistant", "type": "text",
-                         "content": full, "created_at": now_utc().isoformat()}
-        await db.chats.update_one({"chat_id": chat_id},
-            {"$push": {"messages": {"$each": [user_msg, assistant_msg]}},
-             "$set": {"updated_at": now_utc().isoformat(), "title": new_title}})
-        yield f"data: {json.dumps({'type': 'done', 'title': new_title})}\n\n"
-
-    return StreamingResponse(text_gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-# ---------- Regenerate ----------
-class RegenBody(BaseModel):
-    web: bool = True
-    language: str = "en"
-
-
-@api_router.post("/chats/{chat_id}/regenerate")
-async def regenerate_chat(chat_id: str, body: RegenBody, user: User = Depends(get_current_user)):
-    chat = await db.chats.find_one({"chat_id": chat_id, "user_id": user.user_id}, {"_id": 0})
-    if not chat:
-        raise HTTPException(status_code=404, detail="Chat not found")
-    messages = list(chat.get("messages", []))
-    if messages and messages[-1]["role"] == "assistant":
-        messages.pop()
-    if not messages or messages[-1]["role"] != "user":
-        raise HTTPException(status_code=400, detail="Nothing to regenerate")
-    await db.chats.update_one({"chat_id": chat_id}, {"$set": {"messages": messages}})
-
-    lang_name = LANG_NAMES.get(body.language, "English")
-    last_user = messages[-1]
-    convo = build_messages(messages[:-1], last_user.get("content") or " ", lang_name)
-
-    async def gen():
-        assistant_text = []
-        try:
-            async for piece in pollinations_text_stream(convo):
-                assistant_text.append(piece)
-                yield f"data: {json.dumps({'type': 'delta', 'content': piece})}\n\n"
-        except Exception as e:
-            logger.error(f"Regenerate error: {e}")
-            if not assistant_text:
-                msg = "Sorry, something went wrong generating a response."
-                assistant_text.append(msg)
-                yield f"data: {json.dumps({'type': 'delta', 'content': msg})}\n\n"
-        full = "".join(assistant_text)
-        assistant_msg = {"id": uuid.uuid4().hex, "role": "assistant", "type": "text",
-                         "content": full, "created_at": now_utc().isoformat()}
-        await db.chats.update_one({"chat_id": chat_id},
-            {"$push": {"messages": assistant_msg}, "$set": {"updated_at": now_utc().isoformat()}})
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-# ---------- PayPal billing ----------
+# =====================================================================================
+# BILLING (PayPal) — invariato nella logica, solo db -> Supabase
+# =====================================================================================
 def paypal_configured() -> bool:
     return bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET)
 
 
 async def paypal_token() -> str:
-    r = await asyncio.to_thread(
-        requests.post, f"{PAYPAL_BASE}/v1/oauth2/token",
-        auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
-        data={"grant_type": "client_credentials"}, timeout=20)
-    r.raise_for_status()
-    return r.json()["access_token"]
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(f"{PAYPAL_BASE}/v1/oauth2/token",
+                              auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
+                              data={"grant_type": "client_credentials"})
+        r.raise_for_status()
+        return r.json()["access_token"]
 
 
 async def ensure_paypal_plans():
-    cfg = await db.app_config.find_one({"key": "paypal_plans"}, {"_id": 0})
+    cfg = await sb_select_one("app_config", key="paypal_plans")
     if cfg and cfg.get("mode") == PAYPAL_MODE and cfg.get("monthly_plan_id") and cfg.get("yearly_plan_id"):
         return cfg
     token = await paypal_token()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    prod = await asyncio.to_thread(requests.post, f"{PAYPAL_BASE}/v1/catalogs/products", headers=headers,
-        json={"name": "Claus IA Pro", "description": "Claus IA Pro subscription",
-              "type": "SERVICE", "category": "SOFTWARE"}, timeout=20)
-    prod.raise_for_status()
-    product_id = prod.json()["id"]
+    async with httpx.AsyncClient(timeout=20) as client:
+        prod = await client.post(f"{PAYPAL_BASE}/v1/catalogs/products", headers=headers,
+            json={"name": "Claus IA Pro", "description": "Claus IA Pro subscription",
+                  "type": "SERVICE", "category": "SOFTWARE"})
+        prod.raise_for_status()
+        product_id = prod.json()["id"]
 
-    def plan_payload(name, interval, value):
-        return {"product_id": product_id, "name": name, "status": "ACTIVE",
-                "billing_cycles": [{"frequency": {"interval_unit": interval, "interval_count": 1},
-                                    "tenure_type": "REGULAR", "sequence": 1, "total_cycles": 0,
-                                    "pricing_scheme": {"fixed_price": {"value": value, "currency_code": "EUR"}}}],
-                "payment_preferences": {"auto_bill_outstanding": True,
-                                        "setup_fee": {"value": "0", "currency_code": "EUR"},
-                                        "setup_fee_failure_action": "CONTINUE",
-                                        "payment_failure_threshold": 1}}
+        def plan_payload(name, interval, value):
+            return {"product_id": product_id, "name": name, "status": "ACTIVE",
+                    "billing_cycles": [{"frequency": {"interval_unit": interval, "interval_count": 1},
+                                        "tenure_type": "REGULAR", "sequence": 1, "total_cycles": 0,
+                                        "pricing_scheme": {"fixed_price": {"value": value, "currency_code": "EUR"}}}],
+                    "payment_preferences": {"auto_bill_outstanding": True,
+                                            "setup_fee": {"value": "0", "currency_code": "EUR"},
+                                            "setup_fee_failure_action": "CONTINUE",
+                                            "payment_failure_threshold": 1}}
 
-    m = await asyncio.to_thread(requests.post, f"{PAYPAL_BASE}/v1/billing/plans", headers=headers,
-        json=plan_payload("Claus IA Pro Monthly", "MONTH", "10"), timeout=20)
-    m.raise_for_status()
-    y = await asyncio.to_thread(requests.post, f"{PAYPAL_BASE}/v1/billing/plans", headers=headers,
-        json=plan_payload("Claus IA Pro Yearly", "YEAR", "100"), timeout=20)
-    y.raise_for_status()
+        m = await client.post(f"{PAYPAL_BASE}/v1/billing/plans", headers=headers,
+                              json=plan_payload("Claus IA Pro Monthly", "MONTH", "10"))
+        m.raise_for_status()
+        y = await client.post(f"{PAYPAL_BASE}/v1/billing/plans", headers=headers,
+                              json=plan_payload("Claus IA Pro Yearly", "YEAR", "100"))
+        y.raise_for_status()
 
     cfg = {"key": "paypal_plans", "mode": PAYPAL_MODE, "product_id": product_id,
            "monthly_plan_id": m.json()["id"], "yearly_plan_id": y.json()["id"]}
-    await db.app_config.update_one({"key": "paypal_plans"}, {"$set": cfg}, upsert=True)
+    await sb_upsert("app_config", cfg, on_conflict="key")
     return cfg
 
 
@@ -645,30 +905,25 @@ async def billing_config():
             "prices": {"monthly": "10", "yearly": "100", "currency": "EUR"}}
 
 
-class ActivateBody(BaseModel):
-    subscription_id: str
-    plan_type: str = "monthly"
-
-
 @api_router.post("/billing/activate")
 async def billing_activate(body: ActivateBody, user: User = Depends(get_current_user)):
     if not paypal_configured():
         raise HTTPException(status_code=400, detail="PayPal not configured")
     try:
         token = await paypal_token()
-        r = await asyncio.to_thread(requests.get,
-            f"{PAYPAL_BASE}/v1/billing/subscriptions/{body.subscription_id}",
-            headers={"Authorization": f"Bearer {token}"}, timeout=20)
-        r.raise_for_status()
-        sub = r.json()
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(f"{PAYPAL_BASE}/v1/billing/subscriptions/{body.subscription_id}",
+                                 headers={"Authorization": f"Bearer {token}"})
+            r.raise_for_status()
+            sub = r.json()
     except Exception as e:
         logger.error(f"PayPal verify failed: {e}")
         raise HTTPException(status_code=400, detail="Could not verify subscription")
     if sub.get("status") not in ("ACTIVE", "APPROVED"):
         raise HTTPException(status_code=400, detail=f"Subscription not active: {sub.get('status')}")
-    await db.users.update_one({"user_id": user.user_id},
-        {"$set": {"plan": "pro", "subscription_id": body.subscription_id,
-                  "plan_type": body.plan_type, "plan_since": now_utc().isoformat()}})
+    await sb_update("users", {"plan": "pro", "subscription_id": body.subscription_id,
+                              "plan_type": body.plan_type, "plan_since": now_utc().isoformat()},
+                    user_id=user.user_id)
     return {"status": "ok", "plan": "pro"}
 
 
@@ -677,14 +932,13 @@ async def billing_cancel(user: User = Depends(get_current_user)):
     if user.subscription_id and paypal_configured():
         try:
             token = await paypal_token()
-            await asyncio.to_thread(requests.post,
-                f"{PAYPAL_BASE}/v1/billing/subscriptions/{user.subscription_id}/cancel",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"reason": "User requested cancellation"}, timeout=20)
+            async with httpx.AsyncClient(timeout=20) as client:
+                await client.post(f"{PAYPAL_BASE}/v1/billing/subscriptions/{user.subscription_id}/cancel",
+                                  headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                                  json={"reason": "User requested cancellation"})
         except Exception as e:
             logger.error(f"PayPal cancel failed: {e}")
-    await db.users.update_one({"user_id": user.user_id},
-        {"$set": {"plan": "free", "subscription_id": None, "plan_type": None}})
+    await sb_update("users", {"plan": "free", "subscription_id": None, "plan_type": None}, user_id=user.user_id)
     return {"status": "ok", "plan": "free"}
 
 
@@ -697,10 +951,10 @@ async def paypal_webhook(request: Request):
     try:
         if event_type in ("BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED",
                           "BILLING.SUBSCRIPTION.SUSPENDED") and sub_id:
-            await db.users.update_one({"subscription_id": sub_id},
-                {"$set": {"plan": "free", "subscription_id": None, "plan_type": None}})
+            await sb_update("users", {"plan": "free", "subscription_id": None, "plan_type": None},
+                            subscription_id=sub_id)
         elif event_type == "BILLING.SUBSCRIPTION.ACTIVATED" and sub_id:
-            await db.users.update_one({"subscription_id": sub_id}, {"$set": {"plan": "pro"}})
+            await sb_update("users", {"plan": "pro"}, subscription_id=sub_id)
     except Exception as e:
         logger.error(f"Webhook handling error: {e}")
     return {"status": "ok"}
@@ -718,8 +972,3 @@ app.add_middleware(
     allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"], allow_headers=["*"],
 )
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()

@@ -11,8 +11,7 @@ export default function GetStarted() {
   const reviews = getReviews(langCode === "it" ? "it" : "en").slice(0, 3);
 
   const startGoogle = () => {
-    const redirectUrl = window.location.origin + "/";
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+    navigate("/login");
   };
 
   return (

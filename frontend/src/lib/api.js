@@ -47,6 +47,14 @@ export function streamChat(chatId, payload, handlers) {
   return streamSSE(`${API}/chats/${chatId}/stream`, payload, handlers);
 }
 
+export async function saveUserMessage(chatId, body) {
+  return apiPost(`/chats/${chatId}/messages/user`, body);
+}
+
+export async function saveAssistantMessage(chatId, body) {
+  return apiPost(`/chats/${chatId}/messages/assistant`, body);
+}
+
 export function streamRegenerate(chatId, payload, handlers) {
   return streamSSE(`${API}/chats/${chatId}/regenerate`, payload, handlers);
 }

@@ -1,10 +1,9 @@
 import "@/App.css";
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
 import Login from "@/pages/Login";
 import GetStarted from "@/pages/GetStarted";
-import AuthCallback from "@/pages/AuthCallback";
 import ChatApp from "@/pages/ChatApp";
 
 function Protected({ children }) {
@@ -28,10 +27,6 @@ function PublicOnly({ children }) {
 }
 
 function AppRouter() {
-  const location = useLocation();
-  if (location.hash?.includes("session_id=")) {
-    return <AuthCallback />;
-  }
   return (
     <Routes>
       <Route path="/welcome" element={<PublicOnly><GetStarted /></PublicOnly>} />

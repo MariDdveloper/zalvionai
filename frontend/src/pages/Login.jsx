@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Mail, ArrowRight, ArrowLeft, Loader2, Sparkles } from "lucide-react";
@@ -8,6 +8,71 @@ import { getT } from "../lib/i18n";
 import LanguageMenu from "../components/LanguageMenu";
 
 const AUTH_BG = "https://images.pexels.com/photos/5506215/pexels-photo-5506215.jpeg";
+
+// Metti qui lo stesso Client ID che hai nel .env del backend (GOOGLE_CLIENT_ID).
+// Meglio ancora: leggilo da process.env.REACT_APP_GOOGLE_CLIENT_ID se lo hai
+// gia' definito nel .env del frontend.
+const GOOGLE_CLIENT_ID =
+  process.env.REACT_APP_GOOGLE_CLIENT_ID || "IL_TUO_GOOGLE_CLIENT_ID.apps.googleusercontent.com";
+
+/**
+ * Bottone "Continua con Google" - flusso reale (Google Identity Services),
+ * incluso direttamente qui dentro per non dover gestire un file/percorso separato.
+ *
+ * IMPORTANTE (Google Cloud Console -> Credenziali -> il tuo Client ID OAuth):
+ * in "Authorized JavaScript origins" deve comparire l'ORIGINE ESATTA (schema +
+ * dominio + porta) da cui l'app viene servita quando la testi (es. l'URL della
+ * preview). Se non e' in lista, Google rifiuta silenziosamente il bottone.
+ */
+function GoogleLoginButton({ onSuccess, onError }) {
+  const buttonDivRef = useRef(null);
+  const scriptLoadedRef = useRef(false);
+
+  useEffect(() => {
+    function initGoogleButton() {
+      if (!window.google || !buttonDivRef.current) return;
+
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleCredentialResponse,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+
+      window.google.accounts.id.renderButton(buttonDivRef.current, {
+        theme: "outline",
+        size: "large",
+        width: 280,
+        text: "continue_with",
+        shape: "pill",
+      });
+    }
+
+    async function handleCredentialResponse(response) {
+      // response.credential e' il JWT firmato da Google (email, nome, foto).
+      try {
+        const data = await apiPost("/auth/google/verify", { credential: response.credential });
+        onSuccess?.(data.user);
+      } catch (err) {
+        onError?.(err);
+      }
+    }
+
+    if (!scriptLoadedRef.current) {
+      const script = document.createElement("script");
+      script.src = "https://accounts.google.com/gsi/client";
+      script.async = true;
+      script.defer = true;
+      script.onload = initGoogleButton;
+      document.body.appendChild(script);
+      scriptLoadedRef.current = true;
+    } else {
+      initGoogleButton();
+    }
+  }, []);
+
+  return <div ref={buttonDivRef} />;
+}
 
 export default function Login() {
   const [lang, setLang] = useState(localStorage.getItem("claus_lang") || "it");
@@ -21,10 +86,13 @@ export default function Login() {
 
   const handleLang = (c) => { setLang(c); localStorage.setItem("claus_lang", c); };
 
-  const googleLogin = () => {
-    // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-    const redirectUrl = window.location.origin + "/";
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
+  const handleGoogleSuccess = (user) => {
+    setUser(user);
+    navigate("/");
+  };
+
+  const handleGoogleError = (err) => {
+    toast.error(err.message || "Google sign-in failed");
   };
 
   const sendCode = async () => {
@@ -81,10 +149,12 @@ export default function Login() {
               <div>
                 <h1 className="font-serif text-4xl tracking-tight mb-2">Zalvion AI</h1>
                 <p className="text-[var(--text-secondary)] mb-8">{t.welcomeSub}</p>
-                <button data-testid="login-google-button" onClick={googleLogin}
-                  className="w-full flex items-center justify-center gap-3 border border-[var(--border-subtle)] bg-white rounded-full py-3 px-4 font-medium hover:bg-black/[0.03] transition-colors">
-                  <GoogleIcon /> {t.withGoogle}
-                </button>
+
+                {/* Bottone Google reale (Google Identity Services), incluso sopra in questo stesso file */}
+                <div className="flex justify-center" data-testid="login-google-button">
+                  <GoogleLoginButton onSuccess={handleGoogleSuccess} onError={handleGoogleError} />
+                </div>
+
                 <div className="flex items-center gap-3 my-5 text-[var(--text-secondary)] text-sm">
                   <div className="h-px flex-1 bg-[var(--border-subtle)]" /> {t.or} <div className="h-px flex-1 bg-[var(--border-subtle)]" />
                 </div>
@@ -138,7 +208,7 @@ export default function Login() {
                 <input data-testid="otp-input-field" inputMode="numeric" maxLength={6} value={code}
                   onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
                   onKeyDown={(e) => e.key === "Enter" && verify()}
-                  placeholder="••••••" autoFocus
+                  placeholder="......" autoFocus
                   className="w-full mb-5 rounded-xl border border-[var(--border-subtle)] bg-white px-4 py-3 text-center text-2xl tracking-[0.5em] font-mono outline-none focus:border-[var(--primary)] transition-colors" />
                 <button data-testid="verify-otp-button" onClick={verify} disabled={busy}
                   className="w-full flex items-center justify-center gap-2 bg-[var(--primary)] hover:bg-[var(--primary-hover)] text-white rounded-full py-3 font-medium transition-colors disabled:opacity-60">
@@ -151,11 +221,5 @@ export default function Login() {
         </div>
       </div>
     </div>
-  );
-}
-
-function GoogleIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.4 29.3 35 24 35c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 5.1 29.5 3 24 3 11.8 3 2 12.8 2 25s9.8 22 22 22c11 0 21-8 21-22 0-1.3-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 16 19 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.5 7.1 29.5 5 24 5 16.3 5 9.7 9.3 6.3 14.7z" transform="translate(0 -2)"/><path fill="#4CAF50" d="M24 45c5.2 0 10-2 13.6-5.2l-6.3-5.3C29.2 36 26.7 37 24 37c-5.3 0-9.7-3.4-11.3-8.1l-6.5 5C9.5 39.6 16.2 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4 5.5l6.3 5.3C41.4 36 45 30.9 45 24c0-1.3-.1-2.7-.4-3.5z"/></svg>
   );
 }

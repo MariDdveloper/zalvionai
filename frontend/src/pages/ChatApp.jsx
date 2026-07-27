@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Menu } from "lucide-react";
 import { toast } from "sonner";
-import { apiGet, apiPost, apiPatch, apiDelete, streamChat, streamRegenerate } from "../lib/api";
+import { apiGet, apiPost, apiPatch, apiDelete, saveUserMessage, saveAssistantMessage } from "../lib/api";
+import { buildMessages, streamPollinationsText, pollinationsImageUrl } from "../lib/pollinations";
 import { getT } from "../lib/i18n";
 import { useAuth } from "../context/AuthContext";
 import Sidebar from "../components/Sidebar";
@@ -105,52 +106,85 @@ export default function ChatApp() {
       justCreatedRef.current = c.chat_id;
       navigate(`/c/${c.chat_id}`);
     }
+    const historySnapshot = messages;
     const userMsg = { id: "u" + Date.now(), role: "user", type: "text", content: payload.content, attachments: payload.attachmentsMeta };
     const asstId = "a" + Date.now();
-    const asstMsg = { id: asstId, role: "assistant", type: payload.mode === "image" ? "image" : "text", content: "", image_url: "" };
+    const isImage = payload.mode === "image";
+    const asstMsg = { id: asstId, role: "assistant", type: isImage ? "image" : "text", content: "", image_url: "" };
     setMessages((p) => [...p, userMsg, asstMsg]);
     setBusy(true);
     setStreamingId(asstId);
 
-    let acc = "";
-    controllerRef.current = streamChat(activeChatId, {
-      content: payload.content, images: payload.images, files: payload.files,
-      mode: payload.mode, web: payload.web, language: lang,
-    }, {
-      onDelta: (chunk) => { acc += chunk; setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)); },
-      onImage: (evt) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, type: "image", image_url: evt.url, content: evt.text || "" } : m)),
-      onDone: (evt) => {
-        setBusy(false); setStreamingId(null);
-        if (evt?.title) setChats((p) => p.map((c) => c.chat_id === activeChatId ? { ...c, title: evt.title } : c));
-        const arts = parseMessage(acc).artifacts;
-        if (arts.length) setActiveArtifact(arts[arts.length - 1]);
-        loadChats(); checkAuth();
-      },
-      onError: (e) => {
-        setBusy(false); setStreamingId(null);
-        if (e?.status === 402) { toast.error(limitMsg()); setMessages((p) => p.filter((m) => m.id !== asstId && m.id !== userMsg.id)); checkAuth(); return; }
-        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error. Please try again." } : m));
-      },
+    // 1) Persist user message + enforce daily limit (server-side)
+    let saved;
+    try {
+      saved = await saveUserMessage(activeChatId, { content: payload.content, attachments: payload.attachmentsMeta || [] });
+    } catch (e) {
+      setBusy(false); setStreamingId(null);
+      setMessages((p) => p.filter((m) => m.id !== asstId && m.id !== userMsg.id));
+      toast.error(String(e.message || "").toLowerCase().includes("limit") ? limitMsg() : (e.message || "Errore"));
+      checkAuth();
+      return;
+    }
+    if (saved?.title) setChats((p) => p.map((c) => c.chat_id === activeChatId ? { ...c, title: saved.title } : c));
+
+    // 2) Generate directly from the browser (Pollinations)
+    if (isImage) {
+      const url = pollinationsImageUrl(payload.content || "");
+      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, type: "image", image_url: url, content: "" } : m));
+      setBusy(false); setStreamingId(null);
+      await saveAssistantMessage(activeChatId, { type: "image", image_url: url, content: "" }).catch(() => {});
+      loadChats(); checkAuth();
+      return;
+    }
+
+    const msgs = buildMessages(historySnapshot, payload.content || "", lang);
+    const { promise, controller } = streamPollinationsText(msgs, {
+      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
     });
+    controllerRef.current = controller;
+    try {
+      const full = await promise;
+      setBusy(false); setStreamingId(null);
+      const arts = parseMessage(full).artifacts;
+      if (arts.length) setActiveArtifact(arts[arts.length - 1]);
+      await saveAssistantMessage(activeChatId, { type: "text", content: full }).catch(() => {});
+      loadChats(); checkAuth();
+    } catch (e) {
+      setBusy(false); setStreamingId(null);
+      if (e.name === "AbortError") return;
+      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Errore di connessione con l'AI. Riprova." } : m));
+    }
   };
 
   const handleRegenerate = async () => {
     if (!chatId || busy) return;
     let base = messages;
     if (base.length && base[base.length - 1].role === "assistant") base = base.slice(0, -1);
+    const lastUser = [...base].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    const historyForRegen = base.slice(0, base.indexOf(lastUser));
     const asstId = "a" + Date.now();
     setMessages([...base, { id: asstId, role: "assistant", type: "text", content: "" }]);
     setBusy(true);
     setStreamingId(asstId);
-    let acc = "";
-    controllerRef.current = streamRegenerate(chatId, { web, language: lang }, {
-      onDelta: (chunk) => { acc += chunk; setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)); },
-      onDone: () => { setBusy(false); setStreamingId(null); const arts = parseMessage(acc).artifacts; if (arts.length) setActiveArtifact(arts[arts.length - 1]); loadChats(); },
-      onError: () => {
-        setBusy(false); setStreamingId(null);
-        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error." } : m));
-      },
+    const msgs = buildMessages(historyForRegen, lastUser.content || "", lang);
+    const { promise, controller } = streamPollinationsText(msgs, {
+      onDelta: (chunk) => setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content + chunk } : m)),
     });
+    controllerRef.current = controller;
+    try {
+      const full = await promise;
+      setBusy(false); setStreamingId(null);
+      const arts = parseMessage(full).artifacts;
+      if (arts.length) setActiveArtifact(arts[arts.length - 1]);
+      await saveAssistantMessage(chatId, { type: "text", content: full, replace_last: true }).catch(() => {});
+      loadChats();
+    } catch (e) {
+      setBusy(false); setStreamingId(null);
+      if (e.name === "AbortError") return;
+      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Errore di connessione." } : m));
+    }
   };
 
   const stop = () => { controllerRef.current?.abort(); setBusy(false); setStreamingId(null); };
