@@ -512,7 +512,7 @@ async def request_otp(body: OTPRequest):
     })
     html = f"""
     <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:32px;background:#FDFDF9;border:1px solid #EBE8E0;border-radius:16px">
-      <h1 style="color:#D97251;font-size:24px;margin:0 0 8px">Claus IA</h1>
+      <h1 style="color:#D97251;font-size:24px;margin:0 0 8px">Zalvion AI</h1>
       <p style="color:#5C5954;font-size:15px">Your verification code is:</p>
       <div style="font-size:38px;font-weight:700;letter-spacing:10px;color:#2D2A26;background:#F3F2EC;padding:18px;text-align:center;border-radius:12px;margin:16px 0">{code}</div>
       <p style="color:#5C5954;font-size:13px">This code expires in 10 minutes.</p>
@@ -520,7 +520,7 @@ async def request_otp(body: OTPRequest):
     try:
         await asyncio.to_thread(resend.Emails.send, {
             "from": SENDER_EMAIL, "to": [body.email],
-            "subject": f"{code} is your Claus IA verification code", "html": html,
+            "subject": f"{code} is your Zalvion AI verification code", "html": html,
         })
     except Exception as e:
         logger.error(f"Resend send failed: {e}")
