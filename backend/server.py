@@ -403,7 +403,7 @@ def image_quota_message(lang: str) -> str:
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
-async def call_mistral(messages: List[dict], timeout: float = 60.0, max_retries: int = 3) -> str:
+async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 3) -> str:
     """
     Chiama l'API ufficiale di Mistral AI (non Pollinations). E' l'UNICO provider attivo
     di default: nessun fallback automatico verso altri provider in caso di errore.
