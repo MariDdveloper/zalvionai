@@ -18,7 +18,7 @@ export default function ChatApp() {
   const { chatId } = useParams();
   const navigate = useNavigate();
   const { user, checkAuth } = useAuth();
-  const [lang, setLang] = useState(localStorage.getItem("claus_lang") || "it");
+  const [lang, setLang] = useState(localStorage.getItem("claus_lang") || "en");
   const t = getT(lang);
   const [chats, setChats] = useState([]);
   const [folders, setFolders] = useState([]);
