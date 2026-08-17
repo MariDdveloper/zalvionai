@@ -6,7 +6,7 @@ import { getReviews } from "../lib/marketing";
 
 export default function GetStarted() {
   const navigate = useNavigate();
-  const [langCode, setLangCode] = useState(detectLetterLang());
+  const [langCode, setLangCode] = useState("en");
   const L = getLetterLang(langCode);
   const reviews = getReviews(langCode === "it" ? "it" : "en").slice(0, 3);
 
