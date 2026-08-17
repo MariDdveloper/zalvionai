@@ -66,8 +66,8 @@ PAYPAL_CLIENT_ID = os.environ.get('PAYPAL_CLIENT_ID', '')
 PAYPAL_SECRET = os.environ.get('PAYPAL_SECRET', '')
 PAYPAL_BASE = "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == 'sandbox' else "https://api-m.paypal.com"
 
-FREE_DAILY_LIMIT = 10
-PRO_DAILY_LIMIT = 10
+FREE_DAILY_LIMIT = 108958948594
+PRO_DAILY_LIMIT = 108958948594
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
