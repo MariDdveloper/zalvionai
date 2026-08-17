@@ -35,7 +35,7 @@ export default function ChatApp() {
 
   const openArtifact = useCallback((art) => setActiveArtifact(art), []);
 
-  const limitMsg = () => `Daily limit reached (${user?.usage_used || 0}/${user?.usage_limit || 10} tokens used). Recharging compute nodes. Please return tomorrow.`;
+  const limitMsg = () => `Daily limit reached (${user?.usage_used || 0}/∞ tokens used). Recharging compute nodes. Please return tomorrow.`;
 
   const loadChats = useCallback(async () => setChats(await apiGet("/chats").catch(() => [])), []);
   const loadFolders = useCallback(async () => setFolders(await apiGet("/folders").catch(() => [])), []);
@@ -224,7 +224,7 @@ export default function ChatApp() {
             <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded-lg hover:bg-black/5"><Menu size={20} /></button>
             <span className="lg:hidden font-serif text-lg">Zalvion AI</span>
           </div>
-          <span className="text-xs text-[var(--text-secondary)] flex items-center gap-1"><Sparkles size={13} className="text-[var(--primary)]" /> {user?.usage_used || 0}/{user?.usage_limit || 10}</span>
+          <span className="text-xs text-[var(--text-secondary)] flex items-center gap-1"><Sparkles size={13} className="text-[var(--primary)]" /> {user?.usage_used || 0}/∞</span>
         </header>
 
         {empty ? (
