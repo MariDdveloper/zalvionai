@@ -75,7 +75,7 @@ function GoogleLoginButton({ onSuccess, onError }) {
 }
 
 export default function Login() {
-  const [lang, setLang] = useState(localStorage.getItem("claus_lang") || "it");
+  const [lang, setLang] = useState(localStorage.getItem("claus_lang") || "en");
   const t = getT(lang);
   const [step, setStep] = useState("welcome"); // welcome | email | otp
   const [email, setEmail] = useState("");
