@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
 from gtts import gTTS
-
+import io
 import httpx
 import resend
 from dotenv import load_dotenv
