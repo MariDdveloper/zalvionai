@@ -7,4 +7,5 @@ supabase
 pydantic
 google-auth
 email-validator
+gTTS
 
