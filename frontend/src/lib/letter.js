@@ -40,5 +40,5 @@ export function detectLetterLang() {
   const stored = localStorage.getItem("claus_lang");
   if (stored && LETTER_LANGS.some((l) => l.code === stored)) return stored;
   const nav = (navigator.language || "en").slice(0, 2).toLowerCase();
-  return LETTER_LANGS.some((l) => l.code === nav) ? nav : "it";
+  return LETTER_LANGS.some((l) => l.code === nav) ? nav : "en";
 }
