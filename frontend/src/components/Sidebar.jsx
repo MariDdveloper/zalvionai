@@ -191,11 +191,11 @@ export default function Sidebar({
         {user && (
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-accent)] p-3" data-testid="sidebar-usage">
             <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] mb-1.5">
-              <span>{Math.max(0, (user.usage_limit || 10) - (user.usage_used || 0))} {t.messagesLeft}</span>
-              <span>{user.usage_used || 0}/{user.usage_limit || 10}</span>
+              <span>∞ {t.messagesLeft}</span>
+              <span>{user.usage_used || 0}/∞</span>
             </div>
             <div className="h-1.5 rounded-full bg-black/[0.06] overflow-hidden">
-              <div className="h-full bg-[var(--primary)] rounded-full transition-all" style={{ width: `${Math.min(100, ((user.usage_used || 0) / (user.usage_limit || 10)) * 100)}%` }} />
+              <div className="h-full bg-[var(--primary)] rounded-full transition-all" style={{ width: `0%` }} />
             </div>
           </div>
         )}
