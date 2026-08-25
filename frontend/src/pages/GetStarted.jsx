@@ -6,7 +6,7 @@ import { getReviews } from "../lib/marketing";
 
 export default function GetStarted() {
   const navigate = useNavigate();
-  const [langCode, setLangCode] = useState("en");
+  const [langCode, setLangCode] = useState(localStorage.getItem("claus_lang") || "en");
   const L = getLetterLang(langCode);
   const reviews = getReviews(langCode === "it" ? "it" : "en").slice(0, 3);
 
@@ -31,7 +31,7 @@ export default function GetStarted() {
           </div>
           <span className="font-semibold text-lg tracking-tight">Zalvion AI</span>
         </div>
-        <select data-testid="letter-lang-select" value={langCode} onChange={(e) => setLangCode(e.target.value)}
+        <select data-testid="letter-lang-select" value={langCode} onChange={(e) => { setLangCode(e.target.value); localStorage.setItem("claus_lang", e.target.value); }}
           className="bg-white/5 border border-white/10 rounded-full px-4 py-2 text-sm outline-none hover:bg-white/10 transition-colors cursor-pointer backdrop-blur-md">
           {LETTER_LANGS.map((l) => (
             <option key={l.code} value={l.code} className="bg-[#14141c] text-white">{l.label}</option>
