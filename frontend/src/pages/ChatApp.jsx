@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Menu } from "lucide-react";
+import { Menu, Volume2 } from "lucide-react";
 import { toast } from "sonner";
 import { apiGet, apiPost, apiPatch, apiDelete, saveUserMessage, saveAssistantMessage, generateAI } from "../lib/api";
 import { pollinationsImageUrl } from "../lib/pollinations";
@@ -13,6 +13,7 @@ import DownloadModal from "../components/DownloadModal";
 import CodeArtifact from "../components/CodeArtifact";
 import { parseMessage } from "../lib/artifacts";
 import { Sparkles } from "lucide-react";
+import TTSModal from "../components/TTSModal";
 
 export default function ChatApp() {
   const { chatId } = useParams();
@@ -27,6 +28,7 @@ export default function ChatApp() {
   const [web, setWeb] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showDownload, setShowDownload] = useState(false);
+  const [showTTS, setShowTTS] = useState(false);
   const [streamingId, setStreamingId] = useState(null);
   const [activeArtifact, setActiveArtifact] = useState(null);
   const controllerRef = useRef(null);
@@ -224,7 +226,13 @@ export default function ChatApp() {
             <button onClick={() => setSidebarOpen(true)} className="lg:hidden p-2 rounded-lg hover:bg-black/5"><Menu size={20} /></button>
             <span className="lg:hidden font-serif text-lg">Zalvion AI</span>
           </div>
+          <div className="flex items-center gap-3">
+            <button data-testid="tts-open-button" onClick={() => setShowTTS(true)} title={t.ttsTitle}
+              className="p-2 rounded-full border border-[var(--border-subtle)] hover:border-[var(--primary)] hover:text-[var(--primary)] transition-colors">
+              <Volume2 size={18} />
+            </button>
           <span className="text-xs text-[var(--text-secondary)] flex items-center gap-1"><Sparkles size={13} className="text-[var(--primary)]" /> {user?.usage_used || 0}/∞</span>
+            </div>
         </header>
 
         {empty ? (
@@ -275,6 +283,7 @@ export default function ChatApp() {
       </div>
 
       <DownloadModal open={showDownload} onClose={() => setShowDownload(false)} t={t} />
+      <TTSModal open={showTTS} onClose={() => setShowTTS(false)} t={t} lang={lang} />
     </div>
   );
 }
