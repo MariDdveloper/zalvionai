@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
+from gtts import gTTS
 
 import httpx
 import resend
@@ -195,6 +196,14 @@ class ImageGenerateBody(BaseModel):
     height: int = 768
     content: str = ""
     attachments: List[dict] = []
+class TTSBody(BaseModel):
+    text: str
+    lang: str = "it"
+
+
+# gTTS usa i codici lingua di Google Translate: quasi tutti coincidono coi nostri,
+# tranne il cinese che richiede "zh-CN" invece di "zh".
+GTTS_LANG_MAP = {**{code: code for code in LANG_NAMES.keys()}, "zh": "zh-CN"}
 
 
 class AssistantMsgBody(BaseModel):
@@ -702,6 +711,27 @@ async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_cu
         "usage_used": used,
         "usage_limit": daily_limit_for(user.plan),
     }
+@api_router.post("/tts")
+async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
+    """
+    Testo -> voce con gTTS (Google Text-to-Speech), gratuito. Restituisce l'audio MP3
+    come data URL base64, cosi' il frontend puo' riprodurlo/scaricarlo subito.
+    """
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="The text cannot be empty.")
+    if len(text) > 3000:
+        raise HTTPException(status_code=400, detail="Text too long, (max 3000)")
+    gtts_lang = GTTS_LANG_MAP.get(body.lang, "en")
+    try:
+        buf = io.BytesIO()
+        await asyncio.to_thread(lambda: gTTS(text=text, lang=gtts_lang).write_to_fp(buf))
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        logger.error(f"gTTS error: {e}")
+        raise HTTPException(status_code=502, detail="Error in the audio generation, try again")
+    return {"audio_url": f"data:audio/mpeg;base64,{b64}"}
+
 
 
 @api_router.get("/ai/test-pollinations-image")
