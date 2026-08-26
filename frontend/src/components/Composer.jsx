@@ -20,10 +20,12 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
 
   const handleFiles = async (files) => {
     for (const file of files) {
-      const isImage = file.type.startsWith("image/");
-      if (isImage) {
+     if (file.type.startsWith("image/")) {
         const b64 = await toBase64(file);
         setAttachments((a) => [...a, { name: file.name, kind: "image", b64: b64.split(",")[1], preview: b64 }]);
+       } else if (file.type === "application/pdf") {
+        const b64 = await toBase64(file);
+        setAttachments((a) => [...a, { name: file.name, kind: "pdf", b64: b64.split(",")[1] }]);
       } else {
         const txt = await file.text().catch(() => "");
         setAttachments((a) => [...a, { name: file.name, kind: "file", text: txt.slice(0, 60000) }]);
@@ -34,12 +36,10 @@ export default function Composer({ onSend, busy, onStop, web, setWeb, t, lang })
   const send = () => {
     if (busy) return;
     if (!text.trim() && attachments.length === 0) return;
-    const images = attachments.filter((a) => a.kind === "image").map((a) => a.b64);
-    const fileTexts = attachments.filter((a) => a.kind === "file").map((a) => ({ name: a.name, text: a.text }));
+    
     onSend({
       content: text.trim(),
-      images,
-      files: fileTexts,
+      attachments: attachments.map((a) => ({ name: a.name, kind: a.kind, b64: a.b64 || "", text: a.text || "" })),
       mode: imageMode ? "image" : "chat",
       web,
       attachmentsMeta: attachments.map((a) => ({ name: a.name, kind: a.kind })),
