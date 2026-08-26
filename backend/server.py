@@ -517,7 +517,7 @@ async def upload_pdf_to_mistral(pdf_bytes: bytes, filename: str) -> str:
 
 
 
-async def generate_ai_response(messages: List[dict], use_aws_fallback: bool = False) -> str:
+async def generate_ai_response(messages: List[dict], use_aws_fallback: bool = False, model: Optional[str] = None) -> str:
     """
     Dispatcher centrale. Lo switch verso AWS e' SOLO manuale (parametro use_aws_fallback):
     nessun automatismo nel blocco except di Mistral.
