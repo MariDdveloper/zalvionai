@@ -142,7 +142,7 @@ export default function ChatApp() {
 
     const convo = [
       ...historySnapshot.map((m) => ({ role: m.role, content: m.content || (m.type === "image" ? "[immagine generata]" : "") })),
-      { role: "user", content: payload.content || "" },
+      { role: "user", content: payload.content || "", attachments: payload.attachments || [] },
     ];
     try {
       const res = await generateAI({ messages: convo, language: lang });
