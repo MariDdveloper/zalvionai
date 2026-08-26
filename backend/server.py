@@ -50,6 +50,8 @@ MISTRAL_API_KEY = os.environ.get('MISTRAL_API_KEY')
 MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-latest')
 # Altri model id validi: "mistral-small-latest" (più economico/veloce),
 # "open-mistral-nemo", "codestral-latest" (specializzato su codice).
+# Modello con vision, usato SOLO quando l'utente allega immagini o PDF (analisi allegati).
+MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'pixtral-12b-2409')
 
 # ---- Pollinations AI (SOLO generazione immagini — l'endpoint testuale non si usa più) ----
 POLLINATIONS_IMAGE_URL = "https://image.pollinations.ai/prompt/"
@@ -177,11 +179,18 @@ async def verify_google_session_endpoint(payload: GoogleSessionPayload):
     except Exception as e:
         logging.error(f"Crash interno del server: {str(e)}")
         raise HTTPException(status_code=500, detail="Errore di elaborazione interna")
+class AttachmentIn(BaseModel):
+    name: str = ""
+    kind: str = "file"  # image | pdf | file (codice/testo)
+    b64: str = ""  # base64 SENZA prefisso data:... (per image/pdf)
+    text: str = ""  # contenuto testuale già estratto (per file di codice/testo)
+
 
 
 class ChatMessageIn(BaseModel):
     role: str
     content: str
+    attachments: List[AttachmentIn] = []
 
 
 class ChatGenerateBody(BaseModel):
@@ -412,7 +421,7 @@ def image_quota_message(lang: str) -> str:
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
-async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 3) -> str:
+async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 3, model: Optional[str] = None) -> str:
     """
     Chiama l'API ufficiale di Mistral AI (non Pollinations). E' l'UNICO provider attivo
     di default: nessun fallback automatico verso altri provider in caso di errore.
@@ -421,7 +430,7 @@ async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": MISTRAL_MODEL, "messages": messages}
+    payload = {"model": model or MISTRAL_MODEL, "messages": messages}
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
@@ -488,6 +497,24 @@ async def call_deepseek_bedrock(messages: List[dict]) -> str:
         detail="Il provider AWS Bedrock/DeepSeek non e' ancora attivo. "
                "Resta disponibile solo Mistral AI finche' non viene configurato."
     )
+async def upload_pdf_to_mistral(pdf_bytes: bytes, filename: str) -> str:
+    """
+    L'API Mistral non accetta PDF come base64 inline (document_url vuole un URL
+    pubblico/firmato) — quindi carichiamo il file sui Files API di Mistral e
+    generiamo un URL firmato temporaneo da passare come document_url.
+    """
+    headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}"}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        files = {"file": (filename or "document.pdf", pdf_bytes, "application/pdf")}
+        r = await client.post("https://api.mistral.ai/v1/files", headers=headers,
+                              files=files, data={"purpose": "ocr"})
+        r.raise_for_status()
+        file_id = r.json()["id"]
+        r2 = await client.get(f"https://api.mistral.ai/v1/files/{file_id}/url",
+                              headers=headers, params={"expiry": 24})
+        r2.raise_for_status()
+        return r2.json()["url"]
+
 
 
 async def generate_ai_response(messages: List[dict], use_aws_fallback: bool = False) -> str:
@@ -501,7 +528,7 @@ async def generate_ai_response(messages: List[dict], use_aws_fallback: bool = Fa
         return await call_deepseek_bedrock(messages)
 
     try:
-        return await call_mistral(messages)
+        return await call_mistral(messages, model=model)
     except Exception as e:
         logger.error(f"Mistral AI error: {e}")
         raise HTTPException(status_code=502, detail="Errore nella generazione con Mistral AI")
@@ -604,8 +631,33 @@ async def logout(request: Request, response: Response):
 async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
     lang_name = LANG_NAMES.get(body.language, "English")
     messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
-    messages += [{"role": m.role, "content": m.content} for m in body.messages]
-    content = await generate_ai_response(messages, use_aws_fallback=body.use_aws_fallback)
+    has_media = False
+    for m in body.messages:
+        parts = []
+        if m.content:
+            parts.append({"type": "text", "text": m.content})
+        for att in m.attachments:
+            if att.kind == "image" and att.b64:
+                has_media = True
+                parts.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{att.b64}"})
+            elif att.kind == "pdf" and att.b64:
+                try:
+                    pdf_url = await upload_pdf_to_mistral(base64.b64decode(att.b64), att.name)
+                    has_media = True
+                    parts.append({"type": "document_url", "document_url": pdf_url})
+                except Exception as e:
+                    logger.error(f"Errore upload PDF su Mistral: {e}")
+                    parts.append({"type": "text", "text": f"\n\n[Non sono riuscito a leggere il PDF allegato: {att.name}]"})
+            elif att.kind == "file" and att.text:
+                parts.append({"type": "text", "text": f"\n\n[Allegato: {att.name}]\n```\n{att.text}\n```"})
+        if not parts:
+            parts = [{"type": "text", "text": ""}]
+        if len(parts) == 1 and parts[0]["type"] == "text":
+            messages.append({"role": m.role, "content": parts[0]["text"]})
+        else:
+            messages.append({"role": m.role, "content": parts})
+    model = MISTRAL_VISION_MODEL if has_media else None
+    content = await generate_ai_response(messages, use_aws_fallback=body.use_aws_fallback, model=model)
     used = await get_usage_today(user.user_id)
     return {
         "content": content,
