@@ -52,6 +52,153 @@ MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-latest')
 # "open-mistral-nemo", "codestral-latest" (specializzato su codice).
 # Modello con vision, usato SOLO quando l'utente allega immagini o PDF (analisi allegati).
 MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'pixtral-12b-2409')
+# Modello specializzato codice, usato SOLO quando il messaggio riguarda programmazione.
+CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'codestral-latest')
+
+
+CODE_KEYWORDS = (
+    # --- Termini generici multilingua (IT, EN, ES, FR, DE, PT, NL) ---
+    "code", "codice", "código", "code source", "código fonte", "broncode",
+    "script", "sorgente", "source code", "quellcode", "code-quelle",
+    "programma", "programme", "programa", "programm", "programmeren",
+    "programmazione", "programming", "programación", "programmation",
+    "programmierung", "programação",
+    "function", "funzione", "función", "fonction", "funktion", "função", "functie",
+    "metodo", "method", "método", "méthode", "méthode",
+    "debug", "debugging", "eseguire il debug", "debugueo", "débogage", "fehlersuche",
+    "bug", "errore", "error", "erreur", "fehler", "erro",
+    "eccezione", "exception", "excepción", "exception", "ausnahme", "exceção",
+    "crash", "traceback", "stack trace", "stacktrace", "pila di chiamate",
+
+    # --- Linguaggi di programmazione ---
+    "python", "javascript", "typescript", "java ", " c ", "c++", "c#", "golang", "go ",
+    "rust", "ruby", "php", "swift", "kotlin", "scala", "perl", "haskell", "elixir",
+    "erlang", "dart", "lua", "matlab", "octave", "julia", "objective-c", "objective c",
+    "assembly", "assembler", "cobol", "fortran", "pascal", "delphi", "prolog",
+    "clojure", "groovy", "vb.net", "visual basic", "vba", "powershell", "bash",
+    "zsh", "shell script", "sql", "plsql", "pl/sql", "t-sql", "transact-sql",
+    "html", "css", "sass", "scss", "less", "stylus", "xml", "yaml", "toml",
+    "graphql", "nim", "crystal", "f#", "fsharp", "ocaml", "elm", "purescript",
+    "reasonml", "zig", "vlang", "ada", "scheme", "common lisp", "racket",
+    "smalltalk", "tcl", "verilog", "vhdl", "solidity", "webassembly", "wasm",
+    "brainfuck", "cython", "coffeescript", "livescript", "apex", "abap",
+    "d language", "ballerina", "chapel", "hack lang", "raku", "red lang",
+
+    # --- Framework, librerie, ecosistemi ---
+    "react", "react native", "vue", "vue.js", "angular", "angularjs", "svelte",
+    "sveltekit", "next.js", "nextjs", "nuxt", "nuxt.js", "astro", "remix",
+    "gatsby", "django", "flask", "fastapi", "pyramid", "spring", "spring boot",
+    "spring mvc", "laravel", "symfony", "codeigniter", "yii", "rails",
+    "ruby on rails", "sinatra", "express", "express.js", "nestjs", "koa",
+    "hapi", ".net", "dotnet", ".net core", "asp.net", "blazor", "node.js",
+    "nodejs", "deno", "bun", "jquery", "bootstrap", "tailwind", "tailwindcss",
+    "bulma", "material ui", "chakra ui", "redux", "mobx", "recoil", "zustand",
+    "apollo", "apollo client", "prisma", "sequelize", "typeorm", "sqlalchemy",
+    "django orm", "hibernate", "mongoose", "pandas", "numpy", "scipy",
+    "tensorflow", "pytorch", "keras", "scikit-learn", "sklearn", "opencv",
+    "huggingface", "transformers", "langchain", "docker", "docker-compose",
+    "kubernetes", "k8s", "helm", "terraform", "ansible", "puppet", "chef",
+    "jenkins", "github actions", "gitlab ci", "circleci", "travis ci",
+    "webpack", "vite", "rollup", "parcel", "esbuild", "babel", "eslint",
+    "prettier", "jest", "vitest", "mocha", "chai", "pytest", "unittest",
+    "selenium", "playwright", "cypress", "junit", "testng", "phpunit",
+    "rspec", "flutter", "xamarin", "ionic", "cordova", "electron", "tauri",
+    "unity", "unreal engine", "godot engine", "three.js", "d3.js", "chart.js",
+
+    # --- Concetti di programmazione ---
+    "algoritmo", "algorithm", "algoritmo", "algorithme", "algorithmus",
+    "struttura dati", "data structure", "estructura de datos", "structure de données",
+    "array", "vettore", "lista", "list", "liste", "dizionario", "dictionary",
+    "diccionario", "hashmap", "hash table", "tabella hash", "stack", "pila",
+    "queue", "coda", "file d'attente", "albero", "tree", "arbre", "grafo",
+    "graph", "graphe", "ricorsione", "recursion", "récursivité", "iterazione",
+    "iteration", "itération", "loop", "ciclo", "boucle", "schleife", "for loop",
+    "while loop", "do while", "condizionale", "conditional", "condition",
+    "if else", "switch case", "classe", "class", "clase", "klasse", "oggetto",
+    "object", "objet", "ereditarietà", "inheritance", "héritage", "vererbung",
+    "polimorfismo", "polymorphism", "polymorphisme", "incapsulamento",
+    "encapsulation", "interfaccia", "interface", "costruttore", "constructor",
+    "metodo", "method", "parametro", "parameter", "paramètre", "argomento",
+    "argument", "variabile", "variable", "variável", "costante", "constant",
+    "puntatore", "pointer", "pointeur", "riferimento", "reference",
+    "thread", "threading", "multithreading", "processo", "process",
+    "concorrenza", "concurrency", "concurrence", "asincrono", "asynchronous",
+    "async", "await", "promise", "callback", "evento", "event", "listener",
+    "closure", "chiusura", "lambda", "generics", "generici", "enum",
+    "enumerazione", "singleton", "design pattern", "pattern di progettazione",
+    "solid principles", "clean code", "dependency injection", "iniezione di dipendenze",
+
+    # --- Dev tools / versioning ---
+    "git", "github", "gitlab", "bitbucket", "commit", "push", "pull request",
+    "merge request", "merge", "branch", "ramo", "repository", "repo",
+    "ide", "vscode", "visual studio code", "visual studio", "intellij",
+    "pycharm", "eclipse", "xcode", "android studio", "sublime text",
+    "vim", "neovim", "emacs", "terminal", "cli", "command line",
+    "riga di comando", "npm", "npx", "pip", "pipenv", "poetry", "yarn",
+    "pnpm", "cargo", "maven", "gradle", "nuget", "composer", "conda",
+    "virtualenv", "docker hub", "package.json", "requirements.txt",
+
+    # --- Web / backend / data ---
+    "api ", "endpoint", "rest api", "restful", "graphql api", "grpc",
+    "webhook", "backend", "frontend", "fullstack", "full stack",
+    "database", "banca dati", "base de datos", "base de données", "db ",
+    "query", "sql query", "orm", "migration", "migrazione", "schema",
+    "tabella", "table", "indice", "index", "join", "transazione",
+    "transaction", "cache", "caching", "redis", "memcached", "sessione",
+    "session", "cookie", "jwt", "oauth", "sso", "autenticazione",
+    "authentication", "autorizzazione", "authorization", "middleware",
+    "routing", "router", "server", "http", "https", "tcp/ip", "websocket",
+    "json", "parsing", "parser", "compilatore", "compiler", "interprete",
+    "interpreter", "runtime", "framework", "libreria", "library", "sdk",
+    "dipendenza", "dependency", "build", "deploy", "deployment", "ci/cd",
+    "pipeline", "microservizi", "microservices", "monolite", "monolith",
+    "serverless", "lambda function", "cloud function", "edge function",
+    "cdn", "load balancer", "bilanciatore di carico", "reverse proxy",
+    "nginx", "apache", "cors", "csrf", "sql injection", "xss",
+
+    # --- Errori, testing, ottimizzazione ---
+    "exception handling", "gestione delle eccezioni", "try catch",
+    "try except", "null pointer", "undefined", "nan", "memory leak",
+    "perdita di memoria", "race condition", "deadlock", "bottleneck",
+    "collo di bottiglia", "ottimizzazione", "optimization", "performance",
+    "refactoring", "refactor", "code review", "revisione del codice",
+    "unit test", "test unitario", "integration test", "test di integrazione",
+    "mock", "stub", "test coverage", "copertura del codice", "sintassi",
+    "syntax", "regex", "espressione regolare", "regular expression",
+    "linting", "static analysis", "analisi statica", "profiling", "logging",
+)
+
+CODE_EXTENSIONS = (
+    # Python
+    ".py", ".pyw", ".pyx", ".pyi", ".ipynb",
+    # JS / TS
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".d.ts",
+    # JVM
+    ".java", ".class", ".jar", ".kt", ".kts", ".scala", ".groovy", ".clj", ".cljs",
+    # C-family
+    ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".cs", ".m", ".mm",
+    # Web
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".styl", ".vue", ".svelte",
+    ".astro", ".ejs", ".pug", ".hbs", ".mustache", ".twig", ".blade.php", ".cshtml",
+    ".razor", ".aspx", ".jsp",
+    # Backend / vari
+    ".go", ".rb", ".erb", ".php", ".phtml", ".rs", ".swift", ".dart", ".lua",
+    ".pl", ".pm", ".ex", ".exs", ".erl", ".hrl", ".hs", ".fs", ".fsx", ".fsi",
+    ".ml", ".mli", ".nim", ".cr", ".zig", ".v", ".jl", ".r", ".rmd",
+    # Shell / infra
+    ".sh", ".bash", ".zsh", ".fish", ".ps1", ".bat", ".cmd", ".dockerfile",
+    ".tf", ".tfvars", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf",
+    ".env", ".cmake", ".mk", ".makefile", ".gradle", ".pom", ".sbt",
+    # Dati / config
+    ".json", ".jsonc", ".xml", ".csv", ".tsv", ".sql", ".graphql", ".gql", ".proto",
+    # Assembly / low level
+    ".asm", ".s", ".vhd", ".vhdl", ".v", ".sv",
+    # Altri linguaggi
+    ".vb", ".vbs", ".pas", ".pp", ".ada", ".adb", ".ads", ".scm", ".rkt",
+    ".lisp", ".el", ".tcl", ".sol", ".wat", ".wasm", ".apex", ".abap",
+    # Notebook / doc tecnica
+    ".md", ".mdx", ".rst", ".tex",
+)
 
 # ---- Pollinations AI (SOLO generazione immagini — l'endpoint testuale non si usa più) ----
 POLLINATIONS_IMAGE_URL = "https://image.pollinations.ai/prompt/"
@@ -627,6 +774,37 @@ async def logout(request: Request, response: Response):
 # =====================================================================================
 # GENERAZIONE AI (endpoint usato dal frontend per parlare col modello)
 # =====================================================================================
+def is_code_request(body: ChatGenerateBody) -> bool:
+    """Rileva se la conversazione riguarda codice/programmazione, per instradare a Codestral."""
+    if not body.messages:
+        return False
+
+    def has_code_signal(text: str) -> bool:
+        text = (text or "").lower()
+        if "```" in text or "<claus-artifact" in text:
+            return True
+        return any(kw in text for kw in CODE_KEYWORDS)
+
+    last_user_idx = next((i for i in range(len(body.messages) - 1, -1, -1)
+                          if body.messages[i].role == "user"), None)
+    if last_user_idx is None:
+        return False
+    last_user = body.messages[last_user_idx]
+
+    if has_code_signal(last_user.content or ""):
+        return True
+    for att in last_user.attachments:
+        if att.kind == "file" and att.name.lower().endswith(CODE_EXTENSIONS):
+            return True
+
+    # Follow-up corto dopo una risposta con codice → tratta come richiesta di codice
+    if last_user_idx > 0:
+        prev = body.messages[last_user_idx - 1]
+        if prev.role == "assistant" and has_code_signal(prev.content or ""):
+            return True
+
+    return False
+    
 @api_router.post("/ai/generate")
 async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
     lang_name = LANG_NAMES.get(body.language, "English")
@@ -656,7 +834,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
             messages.append({"role": m.role, "content": parts[0]["text"]})
         else:
             messages.append({"role": m.role, "content": parts})
-    model = MISTRAL_VISION_MODEL if has_media else None
+    model = MISTRAL_VISION_MODEL if has_media else (CODESTRAL_MODEL if is_code_request(body) else None)
     content = await generate_ai_response(messages, use_aws_fallback=body.use_aws_fallback, model=model)
     used = await get_usage_today(user.user_id)
     return {
