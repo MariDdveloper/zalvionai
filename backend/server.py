@@ -51,9 +51,9 @@ MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-latest')
 # Altri model id validi: "mistral-small-latest" (più economico/veloce),
 # "open-mistral-nemo", "codestral-latest" (specializzato su codice).
 # Modello con vision, usato SOLO quando l'utente allega immagini o PDF (analisi allegati).
-MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'pixtral-12b-2409')
+MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-large-latest')
 # Modello specializzato codice, usato SOLO quando il messaggio riguarda programmazione.
-CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'codestral-latest')
+CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'mistral-medium-latest')
 
 
 CODE_KEYWORDS = (
