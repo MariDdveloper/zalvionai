@@ -47,13 +47,13 @@ GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 
 # ---- Mistral AI (unico provider di testo attivo) ----
 MISTRAL_API_KEY = os.environ.get('MISTRAL_API_KEY')
-MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-latest')
+MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'zai-glm-5.2')
 # Altri model id validi: "mistral-small-latest" (più economico/veloce),
 # "open-mistral-nemo", "codestral-latest" (specializzato su codice).
 # Modello con vision, usato SOLO quando l'utente allega immagini o PDF (analisi allegati).
-MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-large-latest')
+MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-medium-latest')
 # Modello specializzato codice, usato SOLO quando il messaggio riguarda programmazione.
-CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'mistral-medium-latest')
+CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'zai-glm-5.2')
 
 
 CODE_KEYWORDS = (
