@@ -591,8 +591,8 @@ async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries
         raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": model or MISTRAL_MODEL, "messages": messages}
-        limiter = large_limiter if payload["model"] == "mistral-large-latest" else medium_limiter
-        await limiter.wait()
+    limiter = large_limiter if payload["model"] == "mistral-large-latest" else medium_limiter
+    await limiter.wait()
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
