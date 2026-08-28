@@ -569,11 +569,6 @@ MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
 async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 3, model: Optional[str] = None) -> str:
-    """
-    Chiama l'API ufficiale di Mistral AI (non Pollinations). E' l'UNICO provider attivo
-    di default: nessun fallback automatico verso altri provider in caso di errore.
-    Include un retry con backoff sui 429/502/503/504.
-    """
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
@@ -587,13 +582,17 @@ async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries
             if r.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
                 await asyncio.sleep(3 * (attempt + 1))
                 continue
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise RuntimeError(f"Mistral API {r.status_code} (model={payload['model']}): {r.text[:500]}")
             data = r.json()
             return data["choices"][0]["message"]["content"]
-        except (httpx.HTTPStatusError, httpx.RequestError, KeyError, IndexError, TypeError) as e:
+        except (httpx.RequestError, KeyError, IndexError, TypeError) as e:
             last_exc = e
             if attempt < max_retries - 1:
                 await asyncio.sleep(3 * (attempt + 1))
+        except RuntimeError as e:
+            last_exc = e
+            break  # errore non transitorio (4xx ≠ 429), inutile riprovare
     raise RuntimeError(f"Mistral AI non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
