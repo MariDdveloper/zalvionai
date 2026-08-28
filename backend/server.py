@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 import base64
 import random
@@ -268,6 +269,23 @@ SYSTEM_PROMPT = (
 # =====================================================================================
 # MODELLI Pydantic
 # =====================================================================================
+class RateLimiter:
+    """Spazia le chiamate in base all'RPS reale del tuo tier — attesa solo se serve davvero."""
+    def __init__(self, rps: float):
+        self.min_interval = 1.0 / rps
+        self.last_call = 0.0
+        self.lock = asyncio.Lock()
+
+    async def wait(self):
+        async with self.lock:
+            elapsed = time.monotonic() - self.last_call
+            if elapsed < self.min_interval:
+                await asyncio.sleep(self.min_interval - elapsed)
+            self.last_call = time.monotonic()
+
+# Valori presi da admin.mistral.ai/plateforme/limits — aggiornali se il tier cambia
+large_limiter = RateLimiter(rps=0.07)    # mistral-large-latest
+medium_limiter = RateLimiter(rps=0.83)   # mistral-medium-latest
 class OTPRequest(BaseModel):
     email: EmailStr
 
@@ -573,6 +591,8 @@ async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries
         raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": model or MISTRAL_MODEL, "messages": messages}
+        limiter = large_limiter if payload["model"] == "mistral-large-latest" else medium_limiter
+    await limiter.wait()
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
