@@ -658,7 +658,8 @@ async def searxng_web_search(query: str, num_results: int = 5) -> str:
     """
     if not SEARXNG_URL or not query.strip():
         return ""
-    params = {"q": query.strip()[:300], "format": "json", "engines": "duckduckgo"}
+    params = {"q": query.strip()[:300], "format": "json", "engines": "brave,qwant"}
+
     headers = {"X-Forwarded-For": "127.0.0.1"}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
