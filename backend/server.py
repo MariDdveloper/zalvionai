@@ -18,6 +18,7 @@ from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depend
 from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
+from exa_py import AsyncExa
 
 # Verifica ID token di Google (login Google reale, senza passare da server terzi)
 from google.oauth2 import id_token as google_id_token
@@ -45,7 +46,9 @@ resend.api_key = RESEND_API_KEY
 
 # Login Google reale: Client ID del progetto Google Cloud (OAuth consent screen)
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-SEARXNG_URL = os.environ.get('SEARXNG_URL', 'https://zalvionweb.onrender.com')  # es. https://zalvion-search.onrender.com
+EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
+exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
+
 
 # ---- Mistral AI (unico provider di testo attivo) ----
 MISTRAL_API_KEY = os.environ.get('MISTRAL_API_KEY')
@@ -649,35 +652,31 @@ async def call_pollinations_image(prompt: str, timeout: float = 90.0, max_retrie
             if attempt < max_retries - 1:
                 await asyncio.sleep(3 * (attempt + 1))
     raise RuntimeError(f"Pollinations (immagini) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
-async def searxng_web_search(query: str, num_results: int = 5) -> str:
+async def exa_web_search(query: str, num_results: int = 5) -> str:
     """
-    Cerca tramite l'istanza SearXNG self-hosted (motore: DuckDuckGo — Google e' disattivato
-    perche' blocca gli IP datacenter con 403). L'header X-Forwarded-For e' richiesto dal
-    bot-detection interno di SearXNG, altrimenti rifiuta le richieste. Stringa vuota se non
-    configurata o se fallisce: l'AI risponde comunque, solo senza contesto aggiornato.
+    Cerca sul web con Exa AI e restituisce i risultati come testo da iniettare
+    nel contesto del modello. Stringa vuota se la chiave non e' configurata o
+    la ricerca fallisce: l'AI risponde comunque, senza contesto aggiornato.
     """
-    if not SEARXNG_URL or not query.strip():
+    if not exa_client or not query.strip():
         return ""
-    params = {"q": query.strip()[:300], "format": "json", "engines": "wikipedia"}
-
-
-
-
-    headers = {"X-Forwarded-For": "127.0.0.1"}
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(f"{SEARXNG_URL}/search", params=params, headers=headers)
-        r.raise_for_status()
-        results = r.json().get("results", [])[:num_results]
-        if not results:
+        results = await exa_client.search(
+            query.strip()[:300], type="auto", num_results=num_results,
+            contents={"highlights": True},
+        )
+        if not results.results:
             return ""
-        lines = [f"- {it.get('title','')}: {it.get('content','')} (fonte: {it.get('url','')})"
-                 for it in results]
+        lines = []
+        for r in results.results:
+            highlight = r.highlights[0] if getattr(r, "highlights", None) else ""
+            lines.append(f"- {r.title}: {highlight} (fonte: {r.url})")
         return ("Risultati di ricerca web aggiornati a oggi — usali se utili per "
                  "rispondere, e cita le fonti quando lo fai:\n" + "\n".join(lines))
     except Exception as e:
-        logger.error(f"SearXNG search error: {e}")
+        logger.error(f"Exa web search error: {e}")
         return ""
+
 
 
 async def call_deepseek_bedrock(messages: List[dict]) -> str:
@@ -884,7 +883,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
         else:
             messages.append({"role": m.role, "content": parts})
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
-    search_context = await searxng_web_search(last_user_text)
+    search_context = await exa_web_search(last_user_text)
     if search_context:
         messages.insert(1, {"role": "system", "content": search_context})
     model = MISTRAL_VISION_MODEL if has_media else (CODESTRAL_MODEL if is_code_request(body) else None)
