@@ -45,7 +45,7 @@ resend.api_key = RESEND_API_KEY
 
 # Login Google reale: Client ID del progetto Google Cloud (OAuth consent screen)
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-SEARXNG_URL = os.environ.get('SEARXNG_URL', 'https://zalvionweb.onrender.com')  # es. https://zalvion-search.onrender.com
+SEARXNG_URL = os.environ.get('SEARXNG_URL', 'https://mdosch.de')  # es. https://zalvion-search.onrender.com
 
 # ---- Mistral AI (unico provider di testo attivo) ----
 MISTRAL_API_KEY = os.environ.get('MISTRAL_API_KEY')
@@ -658,7 +658,8 @@ async def searxng_web_search(query: str, num_results: int = 5) -> str:
     """
     if not SEARXNG_URL or not query.strip():
         return ""
-    params = {"q": query.strip()[:300], "format": "json", "engines": "brave,qwant"}
+    params = {"q": query.strip()[:300], "format": "json", "engines": "google,duckduckgo,brave,bing"}
+
 
     headers = {"X-Forwarded-For": "127.0.0.1"}
     try:
