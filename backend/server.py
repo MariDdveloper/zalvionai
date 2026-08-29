@@ -45,6 +45,7 @@ resend.api_key = RESEND_API_KEY
 
 # Login Google reale: Client ID del progetto Google Cloud (OAuth consent screen)
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+SEARXNG_URL = os.environ.get('SEARXNG_URL', 'https://zalvionweb.onrender.com')  # es. https://zalvion-search.onrender.com
 
 # ---- Mistral AI (unico provider di testo attivo) ----
 MISTRAL_API_KEY = os.environ.get('MISTRAL_API_KEY')
@@ -648,6 +649,31 @@ async def call_pollinations_image(prompt: str, timeout: float = 90.0, max_retrie
             if attempt < max_retries - 1:
                 await asyncio.sleep(3 * (attempt + 1))
     raise RuntimeError(f"Pollinations (immagini) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+async def searxng_web_search(query: str, num_results: int = 5) -> str:
+    """
+    Cerca tramite l'istanza SearXNG self-hosted (motore: DuckDuckGo — Google e' disattivato
+    perche' blocca gli IP datacenter con 403). L'header X-Forwarded-For e' richiesto dal
+    bot-detection interno di SearXNG, altrimenti rifiuta le richieste. Stringa vuota se non
+    configurata o se fallisce: l'AI risponde comunque, solo senza contesto aggiornato.
+    """
+    if not SEARXNG_URL or not query.strip():
+        return ""
+    params = {"q": query.strip()[:300], "format": "json", "engines": "duckduckgo"}
+    headers = {"X-Forwarded-For": "127.0.0.1"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"{SEARXNG_URL}/search", params=params, headers=headers)
+        r.raise_for_status()
+        results = r.json().get("results", [])[:num_results]
+        if not results:
+            return ""
+        lines = [f"- {it.get('title','')}: {it.get('content','')} (fonte: {it.get('url','')})"
+                 for it in results]
+        return ("Risultati di ricerca web aggiornati a oggi — usali se utili per "
+                 "rispondere, e cita le fonti quando lo fai:\n" + "\n".join(lines))
+    except Exception as e:
+        logger.error(f"SearXNG search error: {e}")
+        return ""
 
 
 async def call_deepseek_bedrock(messages: List[dict]) -> str:
@@ -853,6 +879,10 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
             messages.append({"role": m.role, "content": parts[0]["text"]})
         else:
             messages.append({"role": m.role, "content": parts})
+    last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
+    search_context = await searxng_web_search(last_user_text)
+    if search_context:
+        messages.insert(1, {"role": "system", "content": search_context})
     model = MISTRAL_VISION_MODEL if has_media else (CODESTRAL_MODEL if is_code_request(body) else None)
     content = await generate_ai_response(messages, use_aws_fallback=body.use_aws_fallback, model=model)
     used = await get_usage_today(user.user_id)
