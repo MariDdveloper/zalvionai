@@ -8,4 +8,5 @@ pydantic
 google-auth
 email-validator
 gTTS
+exa-py
 
