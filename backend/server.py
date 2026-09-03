@@ -36,6 +36,11 @@ load_dotenv(ROOT_DIR / '.env')
 SUPABASE_URL = os.environ['SUPABASE_URL']
 SUPABASE_SERVICE_KEY = os.environ['SUPABASE_SERVICE_KEY']
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+# ---- Cloudflare Workers AI (SOLO generazione immagini — Flux 1 schnell, piano free, 720 req/min) ----
+CLOUDFLARE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID', 'c4e0a58259fd2f7713e1bb98a7b23e63')
+CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN', 'cfut_RxYvUQCw2nSbaJEYdhSRNHMeHVGwcBzB8lmFvc9sfa05145d')
+CLOUDFLARE_IMAGE_MODEL = os.environ.get('CLOUDFLARE_IMAGE_MODEL', '@cf/black-forest-labs/flux-1-schnell')
+CLOUDFLARE_IMAGE_STEPS = int(os.environ.get('CLOUDFLARE_IMAGE_STEPS', '8'))  # max consentito dal modello: 8)
 
 # =====================================================================================
 # ALTRE CONFIGURAZIONI
@@ -205,10 +210,7 @@ CODE_EXTENSIONS = (
     ".md", ".mdx", ".rst", ".tex",
 )
 
-# ---- Pollinations AI (SOLO generazione immagini — l'endpoint testuale non si usa più) ----
-POLLINATIONS_IMAGE_URL = "https://image.pollinations.ai/prompt/"
-POLLINATIONS_REFERRER = os.environ.get('POLLINATIONS_REFERRER', 'https://claus-ai.preview.emergentagent.com')
-POLLINATIONS_TOKEN = os.environ.get('POLLINATIONS_TOKEN')  # opzionale, se hai un token Pollinations
+
 
 # ---- AWS Bedrock / DeepSeek: PREDISPOSTO MA NON ATTIVO ----
 # Il flag use_aws_fallback esiste già nell'endpoint di generazione, ma la funzione
@@ -622,38 +624,43 @@ async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries
     raise RuntimeError(f"Mistral AI non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
-async def call_pollinations_image(prompt: str, timeout: float = 90.0, max_retries: int = 3,
-                                  width: int = 768, height: int = 768, model: str = "flux"):
+async def call_cloudflare_flux_image(prompt: str, timeout: float = 180.0, max_retries: int = 3):
     """
-    Genera un'immagine con Pollinations (gratuito, senza chiave). Restituisce
-    (bytes, content_type). Include retry con backoff sui 502/503/504, tipici di
-    un servizio gratuito senza SLA.
+    Genera un'immagine con Flux 1 [schnell] su Cloudflare Workers AI (piano gratuito,
+    10.000 Neuron/giorno, 720 richieste/minuto, nessuna carta richiesta).
+    NB: il modello accetta solo prompt + steps — non supporta width/height custom,
+    l'output ha una risoluzione fissa decisa dal modello stesso.
+    Restituisce (bytes, content_type).
     """
-    import urllib.parse
-    headers = {"Referer": POLLINATIONS_REFERRER}
-    if POLLINATIONS_TOKEN:
-        headers["Authorization"] = f"Bearer {POLLINATIONS_TOKEN}"
-    url = POLLINATIONS_IMAGE_URL + urllib.parse.quote(prompt)
-    params = {"width": width, "height": height, "model": model, "nologo": "true"}
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN non configurate nel file .env")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+    headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"}
+    payload = {"prompt": prompt, "steps": CLOUDFLARE_IMAGE_STEPS}
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.get(url, params=params, headers=headers)
-            if r.status_code in (502, 503, 504) and attempt < max_retries - 1:
+                r = await client.post(url, json=payload, headers=headers)
+            if r.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
                 await asyncio.sleep(3 * (attempt + 1))
                 continue
-            r.raise_for_status()
-            content_type = r.headers.get("Content-Type", "")
-            if not content_type.startswith("image/"):
-                raise RuntimeError(f"Risposta non e' un'immagine (Content-Type: {content_type})")
-            return r.content, content_type
-        except (httpx.HTTPStatusError, httpx.RequestError, RuntimeError) as e:
+            if r.status_code >= 400:
+                raise RuntimeError(f"Cloudflare Workers AI {r.status_code}: {r.text[:500]}")
+            data = r.json()
+            if not data.get("success", False):
+                raise RuntimeError(f"Cloudflare Workers AI errore: {data.get('errors')}")
+            b64_img = data["result"]["image"]
+            return base64.b64decode(b64_img), "image/jpeg"
+        except (httpx.RequestError, KeyError, IndexError, TypeError) as e:
             last_exc = e
             if attempt < max_retries - 1:
                 await asyncio.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"Pollinations (immagini) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+        except RuntimeError as e:
+            last_exc = e
+            break
+    raise RuntimeError(f"Cloudflare Workers AI (Flux, immagini) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 async def exa_web_search(query: str, num_results: int = 5) -> str:
     """
     Cerca sul web con Exa AI e restituisce i risultati come testo da iniettare
@@ -998,17 +1005,16 @@ async def test_mistral():
 @api_router.post("/ai/generate-image")
 async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_current_user)):
     """
-    Genera un'immagine con Pollinations AI (gratuito). Restituisce l'immagine come
-    data URL base64, cosi' il frontend puo' mostrarla subito senza un secondo giro
-    di rete e senza dover ospitare il file da nessuna parte.
+    Genera un'immagine con Flux 1 [schnell] su Cloudflare Workers AI (gratuito, 720 req/min).
+    Restituisce l'immagine come data URL base64. NB: width/height del body sono ignorati
+    da questo provider (risoluzione fissa del modello).
     """
     await enforce_and_increment(user)
     try:
-        content, content_type = await call_pollinations_image(
-            body.prompt, width=body.width, height=body.height)
+        content, content_type = await call_cloudflare_flux_image(body.prompt)
     except Exception as e:
-        logger.error(f"Pollinations image error: {e}")
-        lang = "it"  # fallback semplice; il frontend puo' passare la lingua se serve differenziare
+        logger.error(f"Cloudflare Workers AI (Flux) image error: {e}")
+        lang = "it"
         raise HTTPException(status_code=502, detail=image_quota_message(lang))
     b64 = base64.b64encode(content).decode()
     used = await get_usage_today(user.user_id)
@@ -1040,31 +1046,28 @@ async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
 
 
 
-@api_router.get("/ai/test-pollinations-image")
-async def test_pollinations_image():
+@api_router.get("/ai/test-cloudflare-image")
+async def test_cloudflare_image():
     """
-    Test rapido della generazione immagini via Pollinations. Nessuna scrittura su
-    Supabase, endpoint pensato per debug/monitoraggio manuale (nessuna auth
-    richiesta per semplicita' di verifica).
+    Test rapido della generazione immagini via Cloudflare Workers AI (Flux 1 schnell).
+    Nessuna scrittura su Supabase, nessuna auth richiesta (debug/monitoraggio manuale).
     """
     started = now_utc()
     try:
-        content, content_type = await call_pollinations_image(
+        content, content_type = await call_cloudflare_flux_image(
             "a red apple on a wooden table, photorealistic")
         elapsed = (now_utc() - started).total_seconds()
         return {
-            "provider": "pollinations", "endpoint": POLLINATIONS_IMAGE_URL,
+            "provider": "cloudflare-flux", "model": CLOUDFLARE_IMAGE_MODEL,
             "status": "ok", "elapsed_seconds": round(elapsed, 2),
             "content_type": content_type, "size_bytes": len(content),
         }
     except Exception as e:
         elapsed = (now_utc() - started).total_seconds()
         return {
-            "provider": "pollinations", "endpoint": POLLINATIONS_IMAGE_URL,
+            "provider": "cloudflare-flux", "model": CLOUDFLARE_IMAGE_MODEL,
             "status": "error", "elapsed_seconds": round(elapsed, 2), "error": str(e),
         }
-
-
 # =====================================================================================
 # CHATS
 # =====================================================================================
