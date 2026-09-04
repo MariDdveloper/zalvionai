@@ -660,9 +660,9 @@ async def call_nvidia(
     messages: List[dict], 
     model: str = "meta/llama-3.3-70b-instruct", 
     temperature: float = 0.7, 
-    max_tokens: int = 4096
-) -> AsyncGenerator[str, None]:
-    
+    max_tokens: int = 4096,
+    timeout: Optional[float] = None
+) -> str:
     # Risolve il modello reale prima dell'invio
     active_model = await _resolve_valid_model(model)
     openai_messages = _to_openai_messages(messages)
@@ -672,6 +672,7 @@ async def call_nvidia(
         await nvidia_limiter.wait()
         logger.info(f"NVIDIA NIM: invio richiesta a '{active_model}'")
         
+        chunks = []
         try:
             response = await client.chat.completions.create(
                 model=active_model,
@@ -679,22 +680,23 @@ async def call_nvidia(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
+                timeout=timeout,
             )
             
             async for chunk in response:
                 if chunk.choices and len(chunk.choices) > 0:
                     content = chunk.choices[0].delta.content or ""
                     if content:
-                        yield content
+                        chunks.append(content)
 
         except openai.APIStatusError as e:
             logger.error(f"Errore API NVIDIA ({e.status_code}): {e.message}")
-            yield f"\n[Errore AI {e.status_code}: {e.message}]"
+            return f"\n[Errore AI {e.status_code}: {e.message}]"
         except Exception as e:
             logger.error(f"Errore di connessione: {e}")
-            yield f"\n[Errore di connessione: {str(e)}]"
+            return f"\n[Errore di connessione: {str(e)}]"
 
-
+        return "".join(chunks)
 
 logger = logging.getLogger(__name__)
 
