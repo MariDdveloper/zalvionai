@@ -57,8 +57,8 @@ MISTRAL_API_KEY = 'qPpJLUqo6fOJOXMd33NQFbYuoreAZJJI'
 
 
 # ---- Mistral AI (unico provider di testo attivo) ----
-MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-latest')
-MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-large-latest')
+MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-2512')
+MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-large-2512')
 CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'mistral-medium-latest')
 CODE_KEYWORDS = (
     # --- Termini generici multilingua (IT, EN, ES, FR, DE, PT, NL) ---
