@@ -53,6 +53,7 @@ resend.api_key = RESEND_API_KEY
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
+MISTRAL_API_KEY = 'qPpJLUqo6fOJOXMd33NQFbYuoreAZJJI'
 
 
 # ---- Mistral AI (unico provider di testo attivo) ----
