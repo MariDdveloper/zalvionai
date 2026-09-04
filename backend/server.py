@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
 from gtts import gTTS
 import io
-import httpx
+import httpx as _httpx
 import resend
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
@@ -590,10 +590,10 @@ def image_quota_message(lang: str) -> str:
 # PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Pro, codice: Kimi K3)
 # =====================================================================================
 
+import httpx as _httpx  # solo per costruire un Timeout esplicito sul client NVIDIA
+
 _nvidia_client = None
 
-# Controllo forte e rumoroso all'avvio del server: se la chiave manca, lo sai
-# SUBITO dai log di boot, non al primo utente che prova a chattare.
 if not NVIDIA_API_KEY:
     logger.error("⚠️  NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta AI funzionera' finche' non la imposti in .env / variabili d'ambiente su Render.")
 else:
@@ -606,7 +606,18 @@ def _get_nvidia_client() -> OpenAI:
     if _nvidia_client is None:
         if not NVIDIA_API_KEY:
             raise RuntimeError("NVIDIA_API_KEY non configurata (env var assente o vuota)")
-        _nvidia_client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
+        _nvidia_client = OpenAI(
+            base_url=NVIDIA_BASE_URL,
+            api_key=NVIDIA_API_KEY,
+            # CRITICO: disattiva il retry automatico interno dell'SDK (default: 2).
+            # Gestiamo NOI tutti i retry in call_nvidia, con log visibili ad ogni
+            # tentativo - due livelli di retry sovrapposti erano la causa della lentezza.
+            max_retries=0,
+            # Timeout espliciti e granulari invece del default (read=600s!). Connessione
+            # deve fallire in fretta (10s) se la rete non risponde; la generazione vera
+            # e propria ha piu' margine (90s) ma non i 600s di default.
+            timeout=_httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=10.0),
+        )
     return _nvidia_client
 
 
@@ -635,13 +646,13 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
     return converted
 
 
-async def call_nvidia(messages: List[dict], model: str, timeout: float = 180.0, max_retries: int = 4,
+async def call_nvidia(messages: List[dict], model: str, max_retries: int = 4,
                       temperature: float = 0.7, max_tokens: int = 16384) -> str:
     """
-    Chiama un modello su NVIDIA NIM. Controllo della chiave PRIMA di entrare nel
-    ciclo di retry (fail-fast, log immediato e inequivocabile). Distingue gli
-    errori usando le eccezioni tipizzate del pacchetto openai invece di cercare
-    sottostringhe nel messaggio - piu' robusto e leggibile nei log.
+    Chiama un modello su NVIDIA NIM. Un solo livello di retry (il nostro, qui sotto)
+    - il client e' configurato con max_retries=0 apposta. Ogni tentativo e' loggato
+    con timestamp di inizio e durata, cosi' un rallentamento e' visibile subito e
+    non richiede piu' di indovinare dove si sta perdendo tempo.
     """
     if not NVIDIA_API_KEY:
         logger.error(f"NVIDIA NIM: richiesta bloccata PRIMA dell'invio - NVIDIA_API_KEY assente (model={model})")
@@ -657,7 +668,6 @@ async def call_nvidia(messages: List[dict], model: str, timeout: float = 180.0, 
             temperature=temperature,
             top_p=0.95,
             max_tokens=max_tokens,
-            timeout=timeout,
             stream=False,
             extra_body={"chat_template_kwargs": {"thinking": False}},
         )
@@ -667,50 +677,54 @@ async def call_nvidia(messages: List[dict], model: str, timeout: float = 180.0, 
     for attempt in range(max_retries):
         async with nvidia_semaphore:
             await nvidia_limiter.wait()
+            started = time.monotonic()
             logger.info(f"NVIDIA NIM: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries})")
             try:
-                return await asyncio.to_thread(_run)
+                result = await asyncio.to_thread(_run)
+                elapsed = time.monotonic() - started
+                logger.info(f"NVIDIA NIM: risposta ricevuta da '{model}' in {elapsed:.1f}s")
+                return result
             except openai.RateLimitError as e:
+                elapsed = time.monotonic() - started
                 last_exc = e
                 if attempt < max_retries - 1:
                     wait_s = min(2 ** attempt * 2, 30)
-                    logger.warning(f"NVIDIA NIM 429 (model={model}), attesa {wait_s}s prima del tentativo {attempt + 2}/{max_retries}")
+                    logger.warning(f"NVIDIA NIM 429 dopo {elapsed:.1f}s (model={model}), attesa {wait_s}s prima del tentativo {attempt + 2}/{max_retries}")
                     await asyncio.sleep(wait_s)
                     continue
                 break
-            except openai.APIConnectionError as e:
+            except (openai.APIConnectionError, openai.APITimeoutError) as e:
+                elapsed = time.monotonic() - started
                 last_exc = e
                 if attempt < max_retries - 1:
                     wait_s = 3 * (attempt + 1)
-                    logger.warning(f"NVIDIA NIM: errore di connessione (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
+                    logger.warning(f"NVIDIA NIM: connessione/timeout dopo {elapsed:.1f}s (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
                     await asyncio.sleep(wait_s)
                     continue
                 break
             except openai.InternalServerError as e:
+                elapsed = time.monotonic() - started
                 last_exc = e
                 if attempt < max_retries - 1:
                     wait_s = 3 * (attempt + 1)
-                    logger.warning(f"NVIDIA NIM: errore server 5xx (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
+                    logger.warning(f"NVIDIA NIM: errore server 5xx dopo {elapsed:.1f}s (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
                     await asyncio.sleep(wait_s)
                     continue
                 break
             except openai.AuthenticationError as e:
-                # Chiave sbagliata/revocata: nessun retry ha senso, fallisce sempre uguale.
-                logger.error(f"NVIDIA NIM: 401 Authentication error (model={model}) - la chiave e' sbagliata o revocata: {e}")
+                logger.error(f"NVIDIA NIM: 401 - chiave sbagliata o revocata (model={model}): {e}")
                 raise RuntimeError(f"NVIDIA API key non valida o revocata: {e}") from e
             except openai.APIStatusError as e:
-                # Qualsiasi altro errore HTTP esplicito (400, 403, 404 modello inesistente, ecc.)
                 logger.error(f"NVIDIA NIM: errore {e.status_code} (model={model}): {e}")
                 last_exc = e
                 break
             except Exception as e:
-                # Fallback generico per errori imprevisti (es. problemi di rete non tipizzati)
-                logger.error(f"NVIDIA NIM: errore imprevisto (model={model}): {type(e).__name__}: {e}")
+                elapsed = time.monotonic() - started
+                logger.error(f"NVIDIA NIM: errore imprevisto dopo {elapsed:.1f}s (model={model}): {type(e).__name__}: {e}")
                 last_exc = e
                 break
 
     raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
-
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
     """
     Genera un'immagine con Flux 1 [schnell] su Cloudflare Workers AI (piano gratuito,
