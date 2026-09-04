@@ -706,6 +706,28 @@ async def call_nvidia(messages: List[dict], model: str, max_retries: int = 4,
                 break
 
     raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+logger = logging.getLogger(__name__)
+
+async def print_available_nvidia_models():
+    """Stampa nei log di Render tutti i modelli esattamente disponibili sulla tua chiave NVIDIA."""
+    try:
+        client = _get_nvidia_client()
+        models_response = await client.models.list()
+        
+        # Estrae tutti gli ID esatti dei modelli
+        model_ids = [m.id for m in models_response.data]
+        logger.info(f"✅ Modelli NVIDIA NIM disponibili ({len(model_ids)}):")
+        for m_id in sorted(model_ids):
+            logger.info(f"  - {m_id}")
+            
+        return model_ids
+    except Exception as e:
+        logger.error(f"❌ Errore durante il recupero dei modelli NVIDIA: {e}")
+        return []
+@app.on_event("startup")
+async def startup_event():
+    # Stampa nei log di Render la lista precisa dei modelli utilizzabili
+    await print_available_nvidia_models()
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
     """
     Genera un'immagine con Flux 1 [schnell] su Cloudflare Workers AI (piano gratuito,
