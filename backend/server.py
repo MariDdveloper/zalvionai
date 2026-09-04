@@ -593,43 +593,50 @@ def image_quota_message(lang: str) -> str:
 # =====================================================================================
 
 
-_nvidia_client: Optional[AsyncOpenAI] = None
-
-if not NVIDIA_API_KEY:
-    logger.error("⚠️ NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta AI funzionera' finche' non la imposti in .env / variabili d'ambiente su Render.")
-else:
-    _masked = NVIDIA_API_KEY[:8] + "..." + NVIDIA_API_KEY[-4:] if len(NVIDIA_API_KEY) > 12 else "***"
-    logger.info(f"NVIDIA_API_KEY caricata correttamente ({_masked})")
-
-
-
-
-def get_clean_nvidia_base_url() -> str:
-    raw_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
-    
-    # Rimuove slash finali e qualsiasi percorso aggiuntivo come /chat/completions
-    clean_url = re.sub(r"/(chat/completions|completions|models)/?$", "", raw_url)
-    clean_url = clean_url.rstrip("/")
-    
-    # Assicura che finisca sempre con /v1
-    if not clean_url.endswith("/v1"):
-        clean_url = f"{clean_url}/v1"
-        
-    return clean_url
+_nvidia_client: AsyncOpenAI | None = None
+_cached_models: list[str] = []
 
 def _get_nvidia_client() -> AsyncOpenAI:
     global _nvidia_client
     if _nvidia_client is None:
-        base_url = get_clean_nvidia_base_url()
-        logger.info(f"NVIDIA Client inizializzato con Base URL: {base_url}")
-        
+        if not NVIDIA_API_KEY:
+            raise RuntimeError("NVIDIA_API_KEY non impostata nell'ambiente.")
         _nvidia_client = AsyncOpenAI(
-            base_url=base_url,
+            base_url=NVIDIA_BASE_URL,
             api_key=NVIDIA_API_KEY,
             max_retries=0,
             timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=30.0),
         )
     return _nvidia_client
+
+async def _resolve_valid_model(requested_model: str) -> str:
+    """Verifica se il modello esiste su NVIDIA NIM ed evita errori 404 di routing."""
+    global _cached_models
+    client = _get_nvidia_client()
+    
+    # Recupera i modelli disponibili se la cache è vuota
+    if not _cached_models:
+        try:
+            models_data = await client.models.list()
+            _cached_models = [m.id for m in models_data.data]
+            logger.info(f"Modelli NVIDIA NIM attivi rilevati: {_cached_models}")
+        except Exception as e:
+            logger.error(f"Errore durante il recupero dei modelli da NVIDIA: {e}")
+            # Fallback sicuro se la chiamata alle API modelli fallisce
+            return "meta/llama-3.3-70b-instruct"
+
+    # Se il modello richiesto esiste, usa quello
+    if requested_model in _cached_models:
+        return requested_model
+
+    # Se il modello non esiste, seleziona il primo valido dalla lista
+    fallback = _cached_models[0] if _cached_models else "meta/llama-3.3-70b-instruct"
+    logger.warning(
+        f"⚠️ Modello '{requested_model}' NON presente su NVIDIA NIM (causerebbe 404). "
+        f"Reindirizzamento automatico su '{fallback}'."
+    )
+    return fallback
+
 
 
 def _to_openai_messages(messages: List[dict]) -> List[dict]:
@@ -649,78 +656,46 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
-
-
-async def call_nvidia(messages: List[dict], model: str, max_retries: int = 4,
-                      temperature: float = 0.7, max_tokens: int = 16384) -> str:
-    if not NVIDIA_API_KEY:
-        logger.error(f"NVIDIA NIM: richiesta bloccata PRIMA dell'invio - NVIDIA_API_KEY assente (model={model})")
-        raise RuntimeError("NVIDIA_API_KEY non configurata - controlla le variabili d'ambiente su Render")
-
+async def call_nvidia_stream(
+    messages: List[dict], 
+    model: str = "meta/llama-3.3-70b-instruct", 
+    temperature: float = 0.7, 
+    max_tokens: int = 4096
+) -> AsyncGenerator[str, None]:
+    
+    # Risolve il modello reale prima dell'invio
+    active_model = await _resolve_valid_model(model)
     openai_messages = _to_openai_messages(messages)
     client = _get_nvidia_client()
 
-    last_exc: Optional[Exception] = None
-    for attempt in range(max_retries):
-        async with nvidia_semaphore:
-            await nvidia_limiter.wait()
-            started = time.monotonic()
-            logger.info(f"NVIDIA NIM: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries})")
-            try:
-                # Chiamata nativa asincrona diretta con AsyncOpenAI
-                completion = await client.chat.completions.create(
-                    model=model,
-                    messages=openai_messages,
-                    temperature=temperature,
-                    top_p=0.95,
-                    max_tokens=max_tokens,
-                    stream=True,
-                    extra_body={"chat_template_kwargs": {"thinking": False}},
-                )
-                elapsed = time.monotonic() - started
-                logger.info(f"NVIDIA NIM: risposta ricevuta da '{model}' in {elapsed:.1f}s")
-                return completion.choices[0].message.content
-            except openai.RateLimitError as e:
-                elapsed = time.monotonic() - started
-                last_exc = e
-                if attempt < max_retries - 1:
-                    wait_s = min(2 ** attempt * 2, 30)
-                    logger.warning(f"NVIDIA NIM 429 dopo {elapsed:.1f}s (model={model}), attesa {wait_s}s prima del tentativo {attempt + 2}/{max_retries}")
-                    await asyncio.sleep(wait_s)
-                    continue
-                break
-            except (openai.APIConnectionError, openai.APITimeoutError) as e:
-                elapsed = time.monotonic() - started
-                last_exc = e
-                if attempt < max_retries - 1:
-                    wait_s = 3 * (attempt + 1)
-                    logger.warning(f"NVIDIA NIM: connessione/timeout dopo {elapsed:.1f}s (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
-                    await asyncio.sleep(wait_s)
-                    continue
-                break
-            except openai.InternalServerError as e:
-                elapsed = time.monotonic() - started
-                last_exc = e
-                if attempt < max_retries - 1:
-                    wait_s = 3 * (attempt + 1)
-                    logger.warning(f"NVIDIA NIM: errore server 5xx dopo {elapsed:.1f}s (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
-                    await asyncio.sleep(wait_s)
-                    continue
-                break
-            except openai.AuthenticationError as e:
-                logger.error(f"NVIDIA NIM: 401 - chiave sbagliata o revocata (model={model}): {e}")
-                raise RuntimeError(f"NVIDIA API key non valida o revocata: {e}") from e
-            except openai.APIStatusError as e:
-                logger.error(f"NVIDIA NIM: errore {e.status_code} (model={model}): {e}")
-                last_exc = e
-                break
-            except Exception as e:
-                elapsed = time.monotonic() - started
-                logger.error(f"NVIDIA NIM: errore imprevisto dopo {elapsed:.1f}s (model={model}): {type(e).__name__}: {e}")
-                last_exc = e
-                break
+    async with nvidia_semaphore:
+        await nvidia_limiter.wait()
+        logger.info(f"NVIDIA NIM: invio richiesta a '{active_model}'")
+        
+        try:
+            response = await client.chat.completions.create(
+                model=active_model,
+                messages=openai_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            
+            async for chunk in response:
+                if chunk.choices and len(chunk.choices) > 0:
+                    content = chunk.choices[0].delta.content or ""
+                    if content:
+                        yield content
 
-    raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+        except openai.APIStatusError as e:
+            logger.error(f"Errore API NVIDIA ({e.status_code}): {e.message}")
+            yield f"\n[Errore AI {e.status_code}: {e.message}]"
+        except Exception as e:
+            logger.error(f"Errore di connessione: {e}")
+            yield f"\n[Errore di connessione: {str(e)}]"
+
+
+
 logger = logging.getLogger(__name__)
 
 async def print_available_nvidia_models():
