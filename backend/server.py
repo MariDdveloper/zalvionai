@@ -21,7 +21,7 @@ from pydantic import BaseModel, EmailStr, Field
 from exa_py import AsyncExa
 import openai
 from openai import OpenAI
-
+from openai import AsyncOpenAI
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_auth_requests
 
@@ -591,44 +591,33 @@ def image_quota_message(lang: str) -> str:
 # PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Pro, codice: Kimi K3)
 # =====================================================================================
 
-import httpx as _httpx  # solo per costruire un Timeout esplicito sul client NVIDIA
 
-_nvidia_client = None
+_nvidia_client: Optional[AsyncOpenAI] = None
 
 if not NVIDIA_API_KEY:
-    logger.error("⚠️  NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta AI funzionera' finche' non la imposti in .env / variabili d'ambiente su Render.")
+    logger.error("⚠️ NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta AI funzionera' finche' non la imposti in .env / variabili d'ambiente su Render.")
 else:
     _masked = NVIDIA_API_KEY[:8] + "..." + NVIDIA_API_KEY[-4:] if len(NVIDIA_API_KEY) > 12 else "***"
     logger.info(f"NVIDIA_API_KEY caricata correttamente ({_masked})")
 
 
-def _get_nvidia_client() -> OpenAI:
+def _get_nvidia_client() -> AsyncOpenAI:
     global _nvidia_client
     if _nvidia_client is None:
         if not NVIDIA_API_KEY:
             raise RuntimeError("NVIDIA_API_KEY non configurata (env var assente o vuota)")
-        _nvidia_client = OpenAI(
+        _nvidia_client = AsyncOpenAI(
             base_url=NVIDIA_BASE_URL,
             api_key=NVIDIA_API_KEY,
-            # CRITICO: disattiva il retry automatico interno dell'SDK (default: 2).
-            # Gestiamo NOI tutti i retry in call_nvidia, con log visibili ad ogni
-            # tentativo - due livelli di retry sovrapposti erano la causa della lentezza.
             max_retries=0,
-            # Timeout espliciti e granulari invece del default (read=600s!). Connessione
-            # deve fallire in fretta (10s) se la rete non risponde; la generazione vera
-            # e propria ha piu' margine (90s) ma non i 600s di default.
-            timeout=_httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=10.0),
+            # Read timeout elevato a 300s (5 minuti) per generazioni lunghe non-streamed.
+            # Pool aumentato a 30s per evitare blocchi della socket queue.
+            timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=30.0),
         )
     return _nvidia_client
 
 
 def _to_openai_messages(messages: List[dict]) -> List[dict]:
-    """
-    Converte i messaggi interni (content: stringa o lista di parti text/image_url/
-    document_url) nel formato standard OpenAI-compatible richiesto da NVIDIA NIM.
-    Immagini e PDF non sono ancora supportati (vision disattivata per ora) -
-    diventano una nota testuale esplicita invece di essere ignorati in silenzio.
-    """
     converted = []
     for m in messages:
         content = m["content"]
@@ -649,30 +638,12 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
 
 async def call_nvidia(messages: List[dict], model: str, max_retries: int = 4,
                       temperature: float = 0.7, max_tokens: int = 16384) -> str:
-    """
-    Chiama un modello su NVIDIA NIM. Un solo livello di retry (il nostro, qui sotto)
-    - il client e' configurato con max_retries=0 apposta. Ogni tentativo e' loggato
-    con timestamp di inizio e durata, cosi' un rallentamento e' visibile subito e
-    non richiede piu' di indovinare dove si sta perdendo tempo.
-    """
     if not NVIDIA_API_KEY:
         logger.error(f"NVIDIA NIM: richiesta bloccata PRIMA dell'invio - NVIDIA_API_KEY assente (model={model})")
         raise RuntimeError("NVIDIA_API_KEY non configurata - controlla le variabili d'ambiente su Render")
 
     openai_messages = _to_openai_messages(messages)
-
-    def _run():
-        client = _get_nvidia_client()
-        completion = client.chat.completions.create(
-            model=model,
-            messages=openai_messages,
-            temperature=temperature,
-            top_p=0.95,
-            max_tokens=max_tokens,
-            stream=False,
-            extra_body={"chat_template_kwargs": {"thinking": False}},
-        )
-        return completion.choices[0].message.content
+    client = _get_nvidia_client()
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
@@ -681,10 +652,19 @@ async def call_nvidia(messages: List[dict], model: str, max_retries: int = 4,
             started = time.monotonic()
             logger.info(f"NVIDIA NIM: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries})")
             try:
-                result = await asyncio.to_thread(_run)
+                # Chiamata nativa asincrona diretta con AsyncOpenAI
+                completion = await client.chat.completions.create(
+                    model=model,
+                    messages=openai_messages,
+                    temperature=temperature,
+                    top_p=0.95,
+                    max_tokens=max_tokens,
+                    stream=False,
+                    extra_body={"chat_template_kwargs": {"thinking": False}},
+                )
                 elapsed = time.monotonic() - started
                 logger.info(f"NVIDIA NIM: risposta ricevuta da '{model}' in {elapsed:.1f}s")
-                return result
+                return completion.choices[0].message.content
             except openai.RateLimitError as e:
                 elapsed = time.monotonic() - started
                 last_exc = e
