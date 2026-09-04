@@ -605,7 +605,7 @@ def _get_nvidia_client() -> AsyncOpenAI:
             base_url=NVIDIA_BASE_URL,
             api_key=NVIDIA_API_KEY,
             max_retries=0,
-            timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=30.0),
+            timeout=httpx.Timeout(connect=15.0, read=None, write=30.0, pool=30.0), # read=None permette lo stream infinito
         )
     return _nvidia_client
 
@@ -656,21 +656,54 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
-async def call_nvidia(
+async def stream_nvidia_code(
     messages: List[dict], 
-    model: str = "meta/llama-3.3-70b-instruct", 
-    temperature: float = 0.7, 
-    max_tokens: int = 4096,
-    timeout: Optional[float] = None
-) -> str:
-    # Risolve il modello reale prima dell'invio
+    model: str = "moonshotai/kimi-k3", 
+    temperature: float = 0.3,
+    max_tokens: int = 16384
+):
+    """Generatore asincrono per lo streaming del codice in tempo reale."""
     active_model = await _resolve_valid_model(model)
     openai_messages = _to_openai_messages(messages)
     client = _get_nvidia_client()
 
     async with nvidia_semaphore:
         await nvidia_limiter.wait()
-        logger.info(f"NVIDIA NIM: invio richiesta a '{active_model}'")
+        logger.info(f"NVIDIA NIM: avvio streaming codice su '{active_model}'")
+        try:
+            response = await client.chat.completions.create(
+                model=active_model,
+                messages=openai_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                timeout=None  # Nessun timeout, lo streaming tiene viva la connessione HTTP
+            )
+            
+            async for chunk in response:
+                if chunk.choices and len(chunk.choices) > 0:
+                    content = chunk.choices[0].delta.content or ""
+                    if content:
+                        yield content
+
+        except Exception as e:
+            logger.error(f"Errore nello streaming Kimi K3: {e}")
+            yield f"\n[Errore generazione codice: {str(e)}]"
+async def call_nvidia(
+    messages: List[dict], 
+    model: str = "deepseek-ai/deepseek-v4-pro-0813", 
+    temperature: float = 0.7, 
+    max_tokens: int = 16384,
+    timeout: Optional[float] = 300.0
+) -> str:
+    """Chiamata a blocco unico per elaborazioni testuali con limite di 5 minuti."""
+    active_model = await _resolve_valid_model(model)
+    openai_messages = _to_openai_messages(messages)
+    client = _get_nvidia_client()
+
+    async with nvidia_semaphore:
+        await nvidia_limiter.wait()
+        logger.info(f"NVIDIA NIM: invio richiesta testo a '{active_model}'")
         
         chunks = []
         try:
