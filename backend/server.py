@@ -56,15 +56,9 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 
 
 # ---- Mistral AI (unico provider di testo attivo) ----
-MISTRAL_API_KEY = 'qPpJLUqo6fOJOXMd33NQFbYuoreAZJJI'
-MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-medium-latest')
-# Altri model id validi: "mistral-small-latest" (più economico/veloce),
-# "open-mistral-nemo", "codestral-latest" (specializzato su codice).
-# Modello con vision, usato SOLO quando l'utente allega immagini o PDF (analisi allegati).
-MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-medium-latest')
-# Modello specializzato codice, usato SOLO quando il messaggio riguarda programmazione.
+MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-large-latest')
+MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-large-latest')
 CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'mistral-medium-latest')
-
 CODE_KEYWORDS = (
     # --- Termini generici multilingua (IT, EN, ES, FR, DE, PT, NL) ---
     "code", "codice", "código", "code source", "código fonte", "broncode",
@@ -304,15 +298,16 @@ class RateLimiter:
 # console.mistral.ai/limits, leggi il valore REALE del tuo tier e mettilo in .env.
 # Se sei ancora in "Free mode" il numero sarà molto basso (es. ~1 richiesta/sec
 # condivisa da tutti i modelli insieme).
-MISTRAL_RPS = float(os.environ.get('MISTRAL_RPS', '0.5'))  # default prudente: 1 richiesta ogni 2s
-mistral_limiter = RateLimiter(rps=MISTRAL_RPS)
-mistral_semaphore = asyncio.Semaphore(1)  # una richiesta Mistral alla volta, le altre aspettano in coda
+# Limiter separati per modello: large e medium hanno budget TPM molto diversi
+# (250k vs 20k) ma stesso RPS (1/sec) sul piano free — vanno tenuti separati
+# perche' ora servono traffico diverso (large = chat/testo/immagini, medium = solo codice).
+LARGE_RPS = float(os.environ.get('MISTRAL_LARGE_RPS', '0.9'))   # margine sotto 1 RPS reale
+CODE_RPS = float(os.environ.get('MISTRAL_CODE_RPS', '0.9'))     # margine sotto 1 RPS reale
 
-
-
-# Valori presi da admin.mistral.ai/plateforme/limits — aggiornali se il tier cambia
-large_limiter = RateLimiter(rps=0.07)    # mistral-large-latest
-medium_limiter = RateLimiter(rps=0.83)   # mistral-medium-latest
+large_limiter = RateLimiter(rps=LARGE_RPS)
+medium_limiter = RateLimiter(rps=CODE_RPS)
+large_semaphore = asyncio.Semaphore(2)   # budget TPM ampio, regge piu' richieste in coda
+medium_semaphore = asyncio.Semaphore(1)  # budget TPM stretto (20k), una alla volta
 class OTPRequest(BaseModel):
     email: EmailStr
 
@@ -617,12 +612,17 @@ async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": model or MISTRAL_MODEL, "messages": messages}
+    resolved_model = model or MISTRAL_MODEL
+    payload = {"model": resolved_model, "messages": messages}
+
+    is_code_model = resolved_model == CODESTRAL_MODEL
+    limiter = medium_limiter if is_code_model else large_limiter
+    semaphore = medium_semaphore if is_code_model else large_semaphore
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
-        async with mistral_semaphore:
-            await mistral_limiter.wait()
+        async with semaphore:
+            await limiter.wait()
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     r = await client.post(MISTRAL_API_URL, json=payload, headers=headers)
@@ -633,21 +633,20 @@ async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries
                 continue
 
         if r.status_code == 429:
-            # Rispetta l'header Retry-After se Mistral lo manda, altrimenti backoff esponenziale
             retry_after = r.headers.get("Retry-After")
-            wait_s = float(retry_after) if retry_after else min(2 ** attempt * 2, 30)
-            logger.warning(f"Mistral 429 (model={payload['model']}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
+            wait_s = float(retry_after) if retry_after else min(2 ** attempt * 2, 60)
+            logger.warning(f"Mistral 429 (model={resolved_model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
             if attempt < max_retries - 1:
                 await asyncio.sleep(wait_s)
                 continue
-            last_exc = RuntimeError(f"Mistral API 429 (model={payload['model']}): {r.text[:300]}")
+            last_exc = RuntimeError(f"Mistral API 429 (model={resolved_model}): {r.text[:300]}")
             break
 
         if r.status_code in (502, 503, 504) and attempt < max_retries - 1:
             await asyncio.sleep(3 * (attempt + 1))
             continue
         if r.status_code >= 400:
-            raise RuntimeError(f"Mistral API {r.status_code} (model={payload['model']}): {r.text[:500]}")
+            raise RuntimeError(f"Mistral API {r.status_code} (model={resolved_model}): {r.text[:500]}")
 
         try:
             data = r.json()
