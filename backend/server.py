@@ -19,7 +19,7 @@ from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
 from exa_py import AsyncExa
-from openai import OpenAI
+import openai
 
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_auth_requests
