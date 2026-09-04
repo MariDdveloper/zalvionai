@@ -586,14 +586,26 @@ def image_quota_message(lang: str) -> str:
 # =====================================================================================
 # PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Pro, codice: Kimi K3)
 # =====================================================================================
+# =====================================================================================
+# PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Pro, codice: Kimi K3)
+# =====================================================================================
+
 _nvidia_client = None
+
+# Controllo forte e rumoroso all'avvio del server: se la chiave manca, lo sai
+# SUBITO dai log di boot, non al primo utente che prova a chattare.
+if not NVIDIA_API_KEY:
+    logger.error("⚠️  NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta AI funzionera' finche' non la imposti in .env / variabili d'ambiente su Render.")
+else:
+    _masked = NVIDIA_API_KEY[:8] + "..." + NVIDIA_API_KEY[-4:] if len(NVIDIA_API_KEY) > 12 else "***"
+    logger.info(f"NVIDIA_API_KEY caricata correttamente ({_masked})")
 
 
 def _get_nvidia_client() -> OpenAI:
     global _nvidia_client
     if _nvidia_client is None:
         if not NVIDIA_API_KEY:
-            raise RuntimeError("NVIDIA_API_KEY non configurata nel file .env")
+            raise RuntimeError("NVIDIA_API_KEY non configurata (env var assente o vuota)")
         _nvidia_client = OpenAI(base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY)
     return _nvidia_client
 
@@ -626,11 +638,15 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
 async def call_nvidia(messages: List[dict], model: str, timeout: float = 180.0, max_retries: int = 4,
                       temperature: float = 0.7, max_tokens: int = 16384) -> str:
     """
-    Chiama un modello su NVIDIA NIM (build.nvidia.com / integrate.api.nvidia.com),
-    endpoint OpenAI-compatible. Con retry e backoff esponenziale su 429/5xx, dato
-    che il piano free e' comunque soggetto a un limite di richieste/minuto condiviso
-    tra tutti i modelli (~40 RPM per account).
+    Chiama un modello su NVIDIA NIM. Controllo della chiave PRIMA di entrare nel
+    ciclo di retry (fail-fast, log immediato e inequivocabile). Distingue gli
+    errori usando le eccezioni tipizzate del pacchetto openai invece di cercare
+    sottostringhe nel messaggio - piu' robusto e leggibile nei log.
     """
+    if not NVIDIA_API_KEY:
+        logger.error(f"NVIDIA NIM: richiesta bloccata PRIMA dell'invio - NVIDIA_API_KEY assente (model={model})")
+        raise RuntimeError("NVIDIA_API_KEY non configurata - controlla le variabili d'ambiente su Render")
+
     openai_messages = _to_openai_messages(messages)
 
     def _run():
@@ -641,6 +657,7 @@ async def call_nvidia(messages: List[dict], model: str, timeout: float = 180.0, 
             temperature=temperature,
             top_p=0.95,
             max_tokens=max_tokens,
+            timeout=timeout,
             stream=False,
             extra_body={"chat_template_kwargs": {"thinking": False}},
         )
@@ -650,22 +667,49 @@ async def call_nvidia(messages: List[dict], model: str, timeout: float = 180.0, 
     for attempt in range(max_retries):
         async with nvidia_semaphore:
             await nvidia_limiter.wait()
+            logger.info(f"NVIDIA NIM: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries})")
             try:
                 return await asyncio.to_thread(_run)
-            except Exception as e:
-                msg = str(e)
-                is_rate_limited = "429" in msg or "rate" in msg.lower()
-                is_server_error = any(code in msg for code in ("500", "502", "503", "504"))
+            except openai.RateLimitError as e:
                 last_exc = e
-                if (is_rate_limited or is_server_error) and attempt < max_retries - 1:
+                if attempt < max_retries - 1:
                     wait_s = min(2 ** attempt * 2, 30)
-                    logger.warning(f"NVIDIA NIM errore transitorio (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {msg[:200]}")
+                    logger.warning(f"NVIDIA NIM 429 (model={model}), attesa {wait_s}s prima del tentativo {attempt + 2}/{max_retries}")
                     await asyncio.sleep(wait_s)
                     continue
                 break
+            except openai.APIConnectionError as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    wait_s = 3 * (attempt + 1)
+                    logger.warning(f"NVIDIA NIM: errore di connessione (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
+                    await asyncio.sleep(wait_s)
+                    continue
+                break
+            except openai.InternalServerError as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    wait_s = 3 * (attempt + 1)
+                    logger.warning(f"NVIDIA NIM: errore server 5xx (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries}): {e}")
+                    await asyncio.sleep(wait_s)
+                    continue
+                break
+            except openai.AuthenticationError as e:
+                # Chiave sbagliata/revocata: nessun retry ha senso, fallisce sempre uguale.
+                logger.error(f"NVIDIA NIM: 401 Authentication error (model={model}) - la chiave e' sbagliata o revocata: {e}")
+                raise RuntimeError(f"NVIDIA API key non valida o revocata: {e}") from e
+            except openai.APIStatusError as e:
+                # Qualsiasi altro errore HTTP esplicito (400, 403, 404 modello inesistente, ecc.)
+                logger.error(f"NVIDIA NIM: errore {e.status_code} (model={model}): {e}")
+                last_exc = e
+                break
+            except Exception as e:
+                # Fallback generico per errori imprevisti (es. problemi di rete non tipizzati)
+                logger.error(f"NVIDIA NIM: errore imprevisto (model={model}): {type(e).__name__}: {e}")
+                last_exc = e
+                break
 
     raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
-
 
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
     """
