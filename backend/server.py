@@ -52,7 +52,7 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # Gratuito, nessuna carta di credito richiesta, ~40 richieste/minuto per account
 # (limite condiviso tra tutti i modelli). Endpoint OpenAI-compatible.
 # NB: MAI mettere una chiave hardcoded come default qui - solo env var.
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-pro-0813')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
