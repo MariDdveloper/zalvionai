@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
 from gtts import gTTS
 import io
-import httpx as _httpx
+import httpx
 import resend
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
