@@ -656,7 +656,7 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
-async def call_nvidia_stream(
+async def call_nvidia(
     messages: List[dict], 
     model: str = "meta/llama-3.3-70b-instruct", 
     temperature: float = 0.7, 
