@@ -601,7 +601,7 @@ def image_quota_message(lang: str) -> str:
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
-async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 3, model: Optional[str] = None) -> str:
+async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 1, model: Optional[str] = None) -> str:
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
