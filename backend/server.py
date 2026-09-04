@@ -64,18 +64,6 @@ MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-medium-latest')
 MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-medium-latest')
 # Modello specializzato codice, usato SOLO quando il messaggio riguarda programmazione.
 CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'mistral-medium-latest')
-# Limite condiviso per TUTTO il traffico Mistral (large + medium + codestral):
-# i tier Mistral sono per organizzazione, non per singolo modello — due limiter
-# separati potrebbero sommarsi e superare comunque il tetto reale dell'account.
-#
-# IMPORTANTE: MISTRAL_RPS è una stima prudente di partenza. Vai su
-# console.mistral.ai/limits, leggi il valore REALE del tuo tier e mettilo in .env.
-# Se sei ancora in "Free mode" il numero sarà molto basso (es. ~1 richiesta/sec
-# condivisa da tutti i modelli insieme).
-MISTRAL_RPS = float(os.environ.get('MISTRAL_RPS', '0.5'))  # default prudente: 1 richiesta ogni 2s
-mistral_limiter = RateLimiter(rps=MISTRAL_RPS)
-mistral_semaphore = asyncio.Semaphore(1)  # una richiesta Mistral alla volta, le altre aspettano in coda
-
 
 CODE_KEYWORDS = (
     # --- Termini generici multilingua (IT, EN, ES, FR, DE, PT, NL) ---
@@ -308,6 +296,19 @@ class RateLimiter:
             if elapsed < self.min_interval:
                 await asyncio.sleep(self.min_interval - elapsed)
             self.last_call = time.monotonic()
+# Limite condiviso per TUTTO il traffico Mistral (large + medium + codestral):
+# i tier Mistral sono per organizzazione, non per singolo modello — due limiter
+# separati potrebbero sommarsi e superare comunque il tetto reale dell'account.
+#
+# IMPORTANTE: MISTRAL_RPS è una stima prudente di partenza. Vai su
+# console.mistral.ai/limits, leggi il valore REALE del tuo tier e mettilo in .env.
+# Se sei ancora in "Free mode" il numero sarà molto basso (es. ~1 richiesta/sec
+# condivisa da tutti i modelli insieme).
+MISTRAL_RPS = float(os.environ.get('MISTRAL_RPS', '0.5'))  # default prudente: 1 richiesta ogni 2s
+mistral_limiter = RateLimiter(rps=MISTRAL_RPS)
+mistral_semaphore = asyncio.Semaphore(1)  # una richiesta Mistral alla volta, le altre aspettano in coda
+
+
 
 # Valori presi da admin.mistral.ai/plateforme/limits — aggiornali se il tier cambia
 large_limiter = RateLimiter(rps=0.07)    # mistral-large-latest
