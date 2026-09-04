@@ -56,7 +56,7 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 
 
 # ---- Mistral AI (unico provider di testo attivo) ----
-MISTRAL_API_KEY = os.environ.get('MISTRAL_API_KEY')
+MISTRAL_API_KEY = os.environ.get('qPpJLUqo6fOJOXMd33NQFbYuoreAZJJI')
 MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-medium-latest')
 # Altri model id validi: "mistral-small-latest" (più economico/veloce),
 # "open-mistral-nemo", "codestral-latest" (specializzato su codice).
