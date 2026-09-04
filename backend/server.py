@@ -56,7 +56,7 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # Modello per richieste normali/testuali (chat, spiegazioni, analisi, ragionamento).
-NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-pro-0813')
+NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 # Modello dedicato alla generazione di codice/artifact.
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
 # Quanti messaggi recenti mandare ad ogni chiamata, per non gonfiare inutilmente
@@ -691,9 +691,9 @@ async def stream_nvidia_code(
             yield f"\n[Errore generazione codice: {str(e)}]"
 async def call_nvidia(
     messages: List[dict], 
-    model: str = "deepseek-ai/deepseek-v4-pro-0813", 
+    model: str = "deepseek-ai/deepseek-v4-flash-0731", 
     temperature: float = 0.7, 
-    max_tokens: int = 16384,
+    max_tokens: int = 4000,
     timeout: Optional[float] = 300.0
 ) -> str:
     """Chiamata a blocco unico per elaborazioni testuali con limite di 5 minuti."""
