@@ -713,7 +713,7 @@ async def call_nvidia(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
-                timeout=timeout,
+                timeout=None,
             )
             
             async for chunk in response:
