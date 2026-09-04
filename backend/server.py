@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import uuid
 import base64
@@ -601,17 +602,31 @@ else:
     logger.info(f"NVIDIA_API_KEY caricata correttamente ({_masked})")
 
 
+
+
+def get_clean_nvidia_base_url() -> str:
+    raw_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip()
+    
+    # Rimuove slash finali e qualsiasi percorso aggiuntivo come /chat/completions
+    clean_url = re.sub(r"/(chat/completions|completions|models)/?$", "", raw_url)
+    clean_url = clean_url.rstrip("/")
+    
+    # Assicura che finisca sempre con /v1
+    if not clean_url.endswith("/v1"):
+        clean_url = f"{clean_url}/v1"
+        
+    return clean_url
+
 def _get_nvidia_client() -> AsyncOpenAI:
     global _nvidia_client
     if _nvidia_client is None:
-        if not NVIDIA_API_KEY:
-            raise RuntimeError("NVIDIA_API_KEY non configurata (env var assente o vuota)")
+        base_url = get_clean_nvidia_base_url()
+        logger.info(f"NVIDIA Client inizializzato con Base URL: {base_url}")
+        
         _nvidia_client = AsyncOpenAI(
-            base_url=NVIDIA_BASE_URL,
+            base_url=base_url,
             api_key=NVIDIA_API_KEY,
             max_retries=0,
-            # Read timeout elevato a 300s (5 minuti) per generazioni lunghe non-streamed.
-            # Pool aumentato a 30s per evitare blocchi della socket queue.
             timeout=httpx.Timeout(connect=15.0, read=300.0, write=30.0, pool=30.0),
         )
     return _nvidia_client
