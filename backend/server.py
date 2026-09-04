@@ -56,7 +56,7 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # Modello per richieste normali/testuali (chat, spiegazioni, analisi, ragionamento).
-NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'google/gemma-2-27b-it')
+NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-pro-0813')
 # Modello dedicato alla generazione di codice/artifact.
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
 # Quanti messaggi recenti mandare ad ogni chiamata, per non gonfiare inutilmente
