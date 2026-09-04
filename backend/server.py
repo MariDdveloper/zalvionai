@@ -51,7 +51,7 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # Gratuito, nessuna carta di credito richiesta, ~40 richieste/minuto per account
 # (limite condiviso tra tutti i modelli, non c'e' un tetto pubblico sui token/minuto
 # come su Mistral free). Endpoint OpenAI-compatible.
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 # Modello per richieste normali/testuali (chat, spiegazioni, analisi, ragionamento).
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-pro-0813')
