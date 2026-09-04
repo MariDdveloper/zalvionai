@@ -64,6 +64,17 @@ MISTRAL_MODEL = os.environ.get('MISTRAL_MODEL', 'mistral-medium-latest')
 MISTRAL_VISION_MODEL = os.environ.get('MISTRAL_VISION_MODEL', 'mistral-medium-latest')
 # Modello specializzato codice, usato SOLO quando il messaggio riguarda programmazione.
 CODESTRAL_MODEL = os.environ.get('CODESTRAL_MODEL', 'mistral-medium-latest')
+# Limite condiviso per TUTTO il traffico Mistral (large + medium + codestral):
+# i tier Mistral sono per organizzazione, non per singolo modello — due limiter
+# separati potrebbero sommarsi e superare comunque il tetto reale dell'account.
+#
+# IMPORTANTE: MISTRAL_RPS è una stima prudente di partenza. Vai su
+# console.mistral.ai/limits, leggi il valore REALE del tuo tier e mettilo in .env.
+# Se sei ancora in "Free mode" il numero sarà molto basso (es. ~1 richiesta/sec
+# condivisa da tutti i modelli insieme).
+MISTRAL_RPS = float(os.environ.get('MISTRAL_RPS', '0.5'))  # default prudente: 1 richiesta ogni 2s
+mistral_limiter = RateLimiter(rps=MISTRAL_RPS)
+mistral_semaphore = asyncio.Semaphore(1)  # una richiesta Mistral alla volta, le altre aspettano in coda
 
 
 CODE_KEYWORDS = (
@@ -601,33 +612,49 @@ def image_quota_message(lang: str) -> str:
 MISTRAL_API_URL = "https://api.mistral.ai/v1/chat/completions"
 
 
-async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 1, model: Optional[str] = None) -> str:
+async def call_mistral(messages: List[dict], timeout: float = 180.0, max_retries: int = 5, model: Optional[str] = None) -> str:
     if not MISTRAL_API_KEY:
         raise RuntimeError("MISTRAL_API_KEY non configurata nel file .env")
     headers = {"Authorization": f"Bearer {MISTRAL_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": model or MISTRAL_MODEL, "messages": messages}
-    limiter = large_limiter if payload["model"] == "mistral-large-latest" else medium_limiter
-    await limiter.wait()
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.post(MISTRAL_API_URL, json=payload, headers=headers)
-            if r.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
-                await asyncio.sleep(3 * (attempt + 1))
+        async with mistral_semaphore:
+            await mistral_limiter.wait()
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    r = await client.post(MISTRAL_API_URL, json=payload, headers=headers)
+            except httpx.RequestError as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(3 * (attempt + 1))
                 continue
-            if r.status_code >= 400:
-                raise RuntimeError(f"Mistral API {r.status_code} (model={payload['model']}): {r.text[:500]}")
+
+        if r.status_code == 429:
+            # Rispetta l'header Retry-After se Mistral lo manda, altrimenti backoff esponenziale
+            retry_after = r.headers.get("Retry-After")
+            wait_s = float(retry_after) if retry_after else min(2 ** attempt * 2, 30)
+            logger.warning(f"Mistral 429 (model={payload['model']}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(wait_s)
+                continue
+            last_exc = RuntimeError(f"Mistral API 429 (model={payload['model']}): {r.text[:300]}")
+            break
+
+        if r.status_code in (502, 503, 504) and attempt < max_retries - 1:
+            await asyncio.sleep(3 * (attempt + 1))
+            continue
+        if r.status_code >= 400:
+            raise RuntimeError(f"Mistral API {r.status_code} (model={payload['model']}): {r.text[:500]}")
+
+        try:
             data = r.json()
             return data["choices"][0]["message"]["content"]
-        except (httpx.RequestError, KeyError, IndexError, TypeError) as e:
+        except (KeyError, IndexError, TypeError) as e:
             last_exc = e
-            if attempt < max_retries - 1:
-                await asyncio.sleep(3 * (attempt + 1))
-        except RuntimeError as e:
-            last_exc = e
-            break  # errore non transitorio (4xx ≠ 429), inutile riprovare
+            break
+
     raise RuntimeError(f"Mistral AI non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
