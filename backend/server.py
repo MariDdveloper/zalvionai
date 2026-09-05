@@ -982,11 +982,11 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
     temperature = 0.3 if is_code else 0.7
     max_tokens = 16384 if is_code else 4096
-    thinking = True if is_code else False  # Kimi K3 ragiona meglio sul codice complesso con thinking attivo
+   
 
     try:
-        content = await call_nvidia(messages, model=model, temperature=temperature,
-                                     max_tokens=max_tokens, thinking=thinking, max_retries=2)
+        content = await call_nvidia(messages, model=model, temperature=temperature, max_tokens=max_tokens,  max_retries=2)
+                                     
     except Exception as e:
         logger.error(f"NVIDIA NIM error: {e}")
         raise HTTPException(status_code=502, detail="Errore nella generazione con Zalvion AI")
