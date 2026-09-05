@@ -665,7 +665,7 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
 
     extra_body = _extra_body_for_model(model, thinking)
     create_kwargs = dict(
-        model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
+        model=model, messages=openai_messages, temperature=temperature,
         max_tokens=max_tokens, stream=True,
     )
     if extra_body:
