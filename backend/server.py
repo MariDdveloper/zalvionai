@@ -55,7 +55,7 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # NB: MAI mettere una chiave hardcoded come default qui - solo env var.
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'openai/gpt-oss-20b')
+NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
 MAX_HISTORY_MESSAGES = 16
 
@@ -978,12 +978,12 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     is_code = is_code_request(body)
     model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
     temperature = 0.3 if is_code else 0.7
-    # Il codice/artifact (siti, componenti, script multi-file) ha bisogno di molto
-    # piu' spazio di output - un sito completo puo' facilmente superare i 4-8k token.
     max_tokens = 16384 if is_code else 4096
+    thinking = True if is_code else False  # Kimi K3 ragiona meglio sul codice complesso con thinking attivo
 
     try:
-        content = await call_nvidia(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+        content = await call_nvidia(messages, model=model, temperature=temperature,
+                                     max_tokens=max_tokens, thinking=thinking, max_retries=2)
     except Exception as e:
         logger.error(f"NVIDIA NIM error: {e}")
         raise HTTPException(status_code=502, detail="Errore nella generazione con Zalvion AI")
