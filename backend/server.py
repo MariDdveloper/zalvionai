@@ -641,7 +641,7 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
     low/medium/high" nel system prompt (doc ufficiale OpenAI/Hugging Face).
     Mandarglielo comunque causa un comportamento anomalo (hang, verificato).
     """
-    if model.startswith("openai/gpt-oss") or not thinking:
+    if model.startswith("openai/gpt-oss"):
         return {}
     return {"chat_template_kwargs": {"thinking": thinking}}
 
@@ -665,13 +665,15 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
 
     extra_body = _extra_body_for_model(model, thinking)
     create_kwargs = dict(
-        model=model, messages=openai_messages, temperature=temperature,
+        model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
         max_tokens=max_tokens, stream=True,
     )
     if extra_body:
         create_kwargs["extra_body"] = extra_body
+    logger.info(f"NVIDIA NIM: chiamata a client.chat.completions.create() per '{model}' - in attesa della risposta HTTP...")
 
     response = await client.chat.completions.create(**create_kwargs)
+    logger.info(f"NVIDIA NIM: risposta HTTP ricevuta da '{model}' dopo {time.monotonic() - started:.1f}s, inizio lettura stream")
     async for chunk in response:
         if not chunk.choices:
             continue
@@ -679,8 +681,8 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
         reasoning = getattr(delta, "reasoning_content", None)
         if reasoning:
             reasoning_chars += len(reasoning)
-            
-        if getattr(delta, "content", None):
+            continue
+        if delta.content:
             if first_token_at is None:
                 first_token_at = time.monotonic() - started
                 logger.info(f"NVIDIA NIM: primo token visibile da '{model}' dopo {first_token_at:.1f}s (reasoning finora: {reasoning_chars} caratteri)")
