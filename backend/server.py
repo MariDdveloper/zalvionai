@@ -52,8 +52,10 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # =====================================================================================
 # Gratuito, nessuna carta di credito richiesta, ~40 richieste/minuto per account
 # (limite condiviso tra tutti i modelli). Endpoint OpenAI-compatible.
-# NB: MAI mettere una chiave hardcoded come default qui - solo env var.
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
+# NB CRITICO: MAI mettere una chiave hardcoded come default qui - solo env var.
+# Se questa riga ha mai contenuto una chiave vera, quella chiave va revocata SUBITO
+# su build.nvidia.com/settings/api-keys, indipendentemente da questo fix.
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
@@ -292,11 +294,7 @@ class RateLimiter:
                 await asyncio.sleep(self.min_interval - elapsed)
             self.last_call = time.monotonic()
 
-# NVIDIA NIM: limite condiviso ~40 richieste/minuto per account, su TUTTI i modelli.
-# nvidia_limiter spazia gli AVVII delle richieste (throughput massimo).
-# nvidia_concurrency limita quante generazioni possono essere IN CORSO insieme,
-# cosi' un utente non blocca tutti gli altri (era Semaphore(1) - il bug della lentezza).
-NVIDIA_RPS = float(os.environ.get('NVIDIA_RPS', '0.55'))  # ~33 richieste/minuto, sotto la soglia reale
+NVIDIA_RPS = float(os.environ.get('NVIDIA_RPS', '0.55'))
 nvidia_limiter = RateLimiter(rps=NVIDIA_RPS)
 nvidia_concurrency = asyncio.Semaphore(4)
 
@@ -359,7 +357,7 @@ async def verify_google_session_endpoint(payload: GoogleSessionPayload):
         raise HTTPException(status_code=500, detail="Errore di elaborazione interna")
 class AttachmentIn(BaseModel):
     name: str = ""
-    kind: str = "file"  # image | pdf | file (codice/testo)
+    kind: str = "file"
     b64: str = ""
     text: str = ""
 
@@ -586,12 +584,6 @@ def image_quota_message(lang: str) -> str:
 
 
 # =====================================================================================
-# PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Pro, codice: Kimi K3)
-# =====================================================================================
-# =====================================================================================
-# PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Flash, codice: Kimi K3)
-# =====================================================================================
-# =====================================================================================
 # PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Flash, codice: Kimi K3)
 # =====================================================================================
 _nvidia_client: Optional[AsyncOpenAI] = None
@@ -616,6 +608,12 @@ def _get_nvidia_client() -> AsyncOpenAI:
 
 
 def _to_openai_messages(messages: List[dict]) -> List[dict]:
+    """
+    Converte i messaggi interni (content: stringa o lista di parti text/image_url/
+    document_url) nel formato standard OpenAI-compatible richiesto da NVIDIA NIM.
+    Immagini e PDF non sono ancora supportati (vision disattivata per ora) -
+    diventano una nota testuale esplicita invece di essere ignorati in silenzio.
+    """
     converted = []
     for m in messages:
         content = m["content"]
@@ -634,29 +632,46 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
     return converted
 
 
+def _extra_body_for_model(model: str, thinking: bool) -> dict:
+    """
+    Il controllo del 'thinking' NON e' uniforme tra i modelli NVIDIA NIM (confermato
+    dalla doc ufficiale LangChain/ChatNVIDIA). DeepSeek e Kimi (Moonshot) accettano
+    chat_template_kwargs.thinking - verificato e funzionante. La famiglia gpt-oss
+    (OpenAI) NON lo supporta: il reasoning si controlla scrivendo "Reasoning:
+    low/medium/high" nel system prompt (doc ufficiale OpenAI/Hugging Face).
+    Mandarglielo comunque causa un comportamento anomalo (hang, verificato).
+    """
+    if model.startswith("openai/gpt-oss"):
+        return {}
+    return {"chat_template_kwargs": {"thinking": thinking}}
+
+
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
                              max_tokens: int = 16384, thinking: bool = False):
     """
-    Async generator: emette SOLO i chunk di testo visibile (content) man mano che
-    arrivano dal modello. I chunk di reasoning_content ("pensiero" interno di
-    DeepSeek/Kimi) vengono contati e loggati ma MAI restituiti al chiamante - non
-    sono la risposta. thinking=False chiede al modello di saltare il ragionamento
-    esteso (sintassi verificata sulla documentazione ufficiale build.nvidia.com).
+    Async generator: emette SOLO il testo visibile (content) man mano che arriva -
+    yield, non accumulo-poi-return. I chunk di reasoning_content ("pensiero"
+    interno di DeepSeek/Kimi) vengono contati e loggati ma mai restituiti.
+    Nessun tetto di tempo: un sito complesso su Kimi K3 puo' richiedere anche
+    15+ minuti, e' normale per un modello di quella taglia su hardware condiviso.
     Nessun retry qui dentro - un fallimento a meta' stream si propaga al chiamante.
     """
     client = _get_nvidia_client()
     openai_messages = _to_openai_messages(messages)
-
     started = time.monotonic()
     reasoning_chars = 0
     content_chars = 0
     first_token_at = None
 
-    response = await client.chat.completions.create(
+    extra_body = _extra_body_for_model(model, thinking)
+    create_kwargs = dict(
         model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
         max_tokens=max_tokens, stream=True,
-        extra_body={"chat_template_kwargs": {"thinking": thinking}},
     )
+    if extra_body:
+        create_kwargs["extra_body"] = extra_body
+
+    response = await client.chat.completions.create(**create_kwargs)
     async for chunk in response:
         if not chunk.choices:
             continue
@@ -683,7 +698,7 @@ async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7
     """
     Wrapper non-streaming per /ai/generate: consuma call_nvidia_stream e restituisce
     il testo completo in un colpo solo. Un fallimento retryable ricomincia lo
-    stream da zero.
+    stream da zero (scarta i chunk parziali gia' ricevuti).
     """
     if not NVIDIA_API_KEY:
         logger.error(f"NVIDIA NIM: richiesta bloccata PRIMA dell'invio - chiave assente (model={model})")
@@ -730,6 +745,7 @@ async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7
                 break
 
     raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+
 
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
     """
@@ -933,24 +949,15 @@ def is_code_request(body: ChatGenerateBody) -> bool:
             return True
 
     return False
-@api_router.post("/ai/generate/stream")
-async def ai_generate_stream(body: ChatGenerateBody, user: User = Depends(get_current_user)):
-    # ... stessa costruzione di `messages` di ai_generate ...
-    is_code = is_code_request(body)
-    model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
-    max_tokens = 16384 if is_code else 4096
-
-    async def event_stream():
-        try:
-            async for piece in call_nvidia_stream(messages, model=model, max_tokens=max_tokens):
-                yield f"data: {piece}\n\n"
-        except Exception as e:
-            yield f"data: [ERRORE: {e}]\n\n"
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@api_router.post("/ai/generate")
-async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
+def build_messages(body: ChatGenerateBody) -> List[dict]:
+    """
+    Costruisce la lista messaggi (system prompt + storico troncato + allegati)
+    usata sia da /ai/generate che da /ai/generate/stream - unica funzione condivisa
+    cosi' i due endpoint non possono mai disallinearsi (era proprio questo il bug:
+    lo stream aveva un placeholder al posto della logica vera).
+    """
     lang_name = LANG_NAMES.get(body.language, "English")
     messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
 
@@ -972,6 +979,12 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
             messages.append({"role": m.role, "content": parts[0]["text"]})
         else:
             messages.append({"role": m.role, "content": parts})
+    return messages
+
+
+@api_router.post("/ai/generate")
+async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
+    messages = build_messages(body)
 
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
     search_context = await exa_web_search(last_user_text)
@@ -982,11 +995,11 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
     temperature = 0.3 if is_code else 0.7
     max_tokens = 16384 if is_code else 4096
-   
+    thinking = True if is_code else False
 
     try:
-        content = await call_nvidia(messages, model=model, temperature=temperature, max_tokens=max_tokens,  max_retries=2)
-                                     
+        content = await call_nvidia(messages, model=model, temperature=temperature,
+                                     max_tokens=max_tokens, thinking=thinking, max_retries=2)
     except Exception as e:
         logger.error(f"NVIDIA NIM error: {e}")
         raise HTTPException(status_code=502, detail="Errore nella generazione con Zalvion AI")
@@ -994,10 +1007,43 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     used = await get_usage_today(user.user_id)
     return {
         "content": content,
-        "provider": "kimi-k3" if is_code else "deepseek-v4-pro",
+        "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
         "usage_used": used,
         "usage_limit": daily_limit_for(user.plan),
     }
+
+
+@api_router.post("/ai/generate/stream")
+async def ai_generate_stream(body: ChatGenerateBody, user: User = Depends(get_current_user)):
+    """
+    Come /ai/generate ma restituisce il testo man mano che nasce (SSE) invece di
+    aspettare la fine. Usa la stessa build_messages() - prima qui c'era solo un
+    commento placeholder e la variabile 'messages' non esisteva mai (NameError
+    ad ogni chiamata). Ora e' reale.
+    """
+    messages = build_messages(body)
+
+    last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
+    search_context = await exa_web_search(last_user_text)
+    if search_context:
+        messages.insert(1, {"role": "system", "content": search_context})
+
+    is_code = is_code_request(body)
+    model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
+    max_tokens = 16384 if is_code else 4096
+    thinking = True if is_code else False
+
+    async def event_stream():
+        try:
+            async for piece in call_nvidia_stream(messages, model=model, max_tokens=max_tokens, thinking=thinking):
+                safe_piece = piece.replace("\n", "\\n")
+                yield f"data: {safe_piece}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            logger.error(f"NVIDIA NIM stream error: {e}")
+            yield f"data: [ERRORE: {str(e)}]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @api_router.get("/ai/test-nvidia")
@@ -1007,9 +1053,9 @@ async def test_nvidia():
     su Supabase, nessuna auth richiesta (debug/monitoraggio manuale).
     """
     cases = [
-        {"name": "testo_deepseek_v4_pro", "model": NVIDIA_TEXT_MODEL, "max_tokens": 200,
+        {"name": "testo_deepseek_v4_flash", "model": NVIDIA_TEXT_MODEL, "max_tokens": 200, "thinking": False,
          "messages": [{"role": "user", "content": "Rispondi con una sola parola: 'ok'."}]},
-        {"name": "codice_kimi_k3", "model": NVIDIA_CODE_MODEL, "max_tokens": 2000,
+        {"name": "codice_kimi_k3", "model": NVIDIA_CODE_MODEL, "max_tokens": 2000, "thinking": True,
          "messages": [{"role": "user", "content": "Scrivi una funzione Python che calcola il fattoriale, "
                                                    "gestendo input negativi con un'eccezione."}]},
     ]
@@ -1017,7 +1063,8 @@ async def test_nvidia():
     for case in cases:
         started = now_utc()
         try:
-            content = await call_nvidia(case["messages"], model=case["model"], max_tokens=case["max_tokens"])
+            content = await call_nvidia(case["messages"], model=case["model"], max_tokens=case["max_tokens"],
+                                        thinking=case["thinking"])
             elapsed = (now_utc() - started).total_seconds()
             results.append({
                 "test": case["name"], "model": case["model"], "status": "ok",
