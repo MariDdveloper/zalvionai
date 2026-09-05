@@ -641,7 +641,7 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
     low/medium/high" nel system prompt (doc ufficiale OpenAI/Hugging Face).
     Mandarglielo comunque causa un comportamento anomalo (hang, verificato).
     """
-    if model.startswith("openai/gpt-oss"):
+    if model.startswith("openai/gpt-oss") or not thinking:
         return {}
     return {"chat_template_kwargs": {"thinking": thinking}}
 
@@ -679,8 +679,8 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
         reasoning = getattr(delta, "reasoning_content", None)
         if reasoning:
             reasoning_chars += len(reasoning)
-            continue
-        if delta.content:
+            
+        if getattr(delta, "content", None):
             if first_token_at is None:
                 first_token_at = time.monotonic() - started
                 logger.info(f"NVIDIA NIM: primo token visibile da '{model}' dopo {first_token_at:.1f}s (reasoning finora: {reasoning_chars} caratteri)")
