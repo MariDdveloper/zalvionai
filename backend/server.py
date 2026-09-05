@@ -591,6 +591,9 @@ def image_quota_message(lang: str) -> str:
 # =====================================================================================
 # PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Flash, codice: Kimi K3)
 # =====================================================================================
+# =====================================================================================
+# PROVIDER AI: NVIDIA NIM (unico provider — testo: DeepSeek V4-Flash, codice: Kimi K3)
+# =====================================================================================
 _nvidia_client: Optional[AsyncOpenAI] = None
 
 if not NVIDIA_API_KEY:
