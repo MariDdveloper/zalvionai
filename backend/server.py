@@ -17,7 +17,6 @@ import openai
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
-from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
@@ -1066,37 +1065,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     }
 
 
-@api_router.post("/ai/generate/stream")
-async def ai_generate_stream(body: ChatGenerateBody, user: User = Depends(get_current_user)):
-    """
-    Come /ai/generate ma restituisce il testo man mano che nasce (SSE) invece di
-    aspettare la fine. Usa la stessa build_messages() - prima qui c'era solo un
-    commento placeholder e la variabile 'messages' non esisteva mai (NameError
-    ad ogni chiamata). Ora e' reale.
-    """
-    messages = build_messages(body)
 
-    last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
-    search_context = await exa_web_search(last_user_text)
-    if search_context:
-        messages.insert(1, {"role": "system", "content": search_context})
-
-    is_code = is_code_request(body)
-    model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
-    max_tokens = NVIDIA_CODE_MAX_TOKENS if is_code else 4096  # era: 16384 if is_code else 4096
-    thinking = True if is_code else False
-
-    async def event_stream():
-        try:
-            async for piece in call_nvidia_stream(messages, model=model, max_tokens=max_tokens, thinking=thinking):
-                safe_piece = piece.replace("\n", "\\n")
-                yield f"data: {safe_piece}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            logger.error(f"NVIDIA NIM stream error: {e}")
-            yield f"data: [ERRORE: {str(e)}]\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @api_router.get("/ai/test-nvidia")
