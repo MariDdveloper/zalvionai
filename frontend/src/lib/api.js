@@ -101,6 +101,26 @@ function streamSSE(url, payload, { onDelta, onImage, onDone, onError }) {
           else if (evt.type === "done") onDone?.(evt);
         }
       }
+            // ... questa è la graffa di chiusura del tuo ciclo "while (true) {" originale
+      }
+
+      // ============================================================
+      // AGGIUNGI SOLO QUESTE RIGHE DA QUI:
+      // ============================================================
+      if (buffer && buffer.trim().startsWith("data:")) {
+        const json = buffer.trim().slice(5).trim();
+        try {
+          const evt = JSON.parse(json);
+          if (evt.type === "delta") onDelta?.(evt.content);
+          else if (evt.type === "image") onImage?.(evt);
+          else if (evt.type === "done") onDone?.(evt);
+        } catch { }
+      }
+      // ============================================================
+      // A QUI (Sotto ritroverai la tua riga nativa onDone?.({}))
+
+      
+
       onDone?.({});
     } catch (e) {
       if (e.name !== "AbortError") onError?.(e);
