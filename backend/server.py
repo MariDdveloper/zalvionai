@@ -17,6 +17,8 @@ import openai
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, Depends
+import json
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
@@ -1000,6 +1002,14 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
 
 @api_router.post("/ai/generate")
 async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
+    """
+    Risposta NON in streaming verso NVIDIA (stream=False, come richiesto) - ma la
+    connessione HTTP verso il frontend resta tecnicamente aperta con byte di
+    keep-alive invisibili (singoli spazi) ogni 15s, per evitare che un proxy nel
+    mezzo (Render, gateway) chiuda la connessione per inattivita' durante attese
+    di 20-25 minuti su Kimi K3 - la causa piu' probabile dei 504 visti finora.
+    Il frontend deve solo aspettare la fine e fare .trim() prima di JSON.parse().
+    """
     messages = build_messages(body)
 
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
@@ -1013,21 +1023,34 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     max_tokens = NVIDIA_CODE_MAX_TOKENS if is_code else 4096
     thinking = True if is_code else False
 
-    try:
-        content = await call_nvidia(messages, model=model, temperature=temperature,
-                                     max_tokens=max_tokens, thinking=thinking)
-    except Exception as e:
-        logger.error(f"NVIDIA NIM error: {e}")
-        raise HTTPException(status_code=502, detail="Errore nella generazione con Zalvion AI")
+    async def body_stream():
+        task = asyncio.create_task(call_nvidia(
+            messages, model=model, temperature=temperature,
+            max_tokens=max_tokens, thinking=thinking,
+        ))
+        try:
+            while not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield " "  # keep-alive invisibile - non e' output, solo per non far chiudere la connessione
+                    continue
+            content = task.result()
+        except Exception as e:
+            logger.error(f"NVIDIA NIM error: {e}")
+            yield "\n" + json.dumps({"error": "Errore nella generazione con Zalvion AI"})
+            return
 
-    used = await get_usage_today(user.user_id)
-    return {
-        "content": content,
-        "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
-        "usage_used": used,
-        "usage_limit": daily_limit_for(user.plan),
-    }
+        used = await get_usage_today(user.user_id)
+        payload = {
+            "content": content,
+            "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
+            "usage_used": used,
+            "usage_limit": daily_limit_for(user.plan),
+        }
+        yield "\n" + json.dumps(payload)
 
+    return StreamingResponse(body_stream(), media_type="application/json")
 
 
 
