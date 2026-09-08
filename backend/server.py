@@ -59,11 +59,13 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # =====================================================================================
 # DEEPINFRA — PROVIDER TESTO (Llama 4 Scout 17B) — NVIDIA NIM resta invariato per il codice
 # =====================================================================================
-DEEPINFRA_API_KEY = os.environ.get('DEEPINFRA_API_KEY')
-DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
-DEEPINFRA_TEXT_MODEL = os.environ.get('DEEPINFRA_TEXT_MODEL', 'meta-llama/Llama-4-Scout-17B-16E-Instruct')
-DEEPINFRA_TEXT_MAX_TOKENS = int(os.environ.get('DEEPINFRA_TEXT_MAX_TOKENS', '4096'))
-
+# =====================================================================================
+# SAMBANOVA CLOUD — PROVIDER TESTO (Llama 3.3 70B) — NVIDIA NIM resta invariato per il codice
+# =====================================================================================
+SAMBANOVA_API_KEY = os.environ.get('SAMBANOVA_API_KEY')
+SAMBANOVA_BASE_URL = "https://api.sambanova.ai/v1"
+SAMBANOVA_TEXT_MODEL = os.environ.get('SAMBANOVA_TEXT_MODEL', 'Meta-Llama-3.3-70B-Instruct')
+SAMBANOVA_TEXT_MAX_TOKENS = int(os.environ.get('SAMBANOVA_TEXT_MAX_TOKENS', '4096'))
 # =====================================================================================
 # NVIDIA NIM — UNICO PROVIDER AI DI ZALVION (testo + codice)
 # =====================================================================================
@@ -635,31 +637,29 @@ def _get_nvidia_client() -> AsyncOpenAI:
             timeout=httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=30.0),
         )
     return _nvidia_client
-DEEPINFRA_RPS = float(os.environ.get('DEEPINFRA_RPS', '10.0'))
-deepinfra_limiter = RateLimiter(rps=DEEPINFRA_RPS)
-deepinfra_concurrency = asyncio.Semaphore(8)
+SAMBANOVA_RPS = float(os.environ.get('SAMBANOVA_RPS', '10.0'))
+sambanova_limiter = RateLimiter(rps=SAMBANOVA_RPS)
+sambanova_concurrency = asyncio.Semaphore(8)
 
-_deepinfra_client: Optional[AsyncOpenAI] = None
+_sambanova_client: Optional[AsyncOpenAI] = None
 
-if not DEEPINFRA_API_KEY:
-    logger.error("⚠️  DEEPINFRA_API_KEY NON CONFIGURATA — le richieste di testo (Llama 4 Scout) falliranno.")
+if not SAMBANOVA_API_KEY:
+    logger.error("⚠️  SAMBANOVA_API_KEY NON CONFIGURATA — le richieste di testo (Llama 3.3 70B) falliranno.")
 else:
-    _masked_di = DEEPINFRA_API_KEY[:8] + "..." + DEEPINFRA_API_KEY[-4:] if len(DEEPINFRA_API_KEY) > 12 else "***"
-    logger.info(f"DEEPINFRA_API_KEY caricata correttamente ({_masked_di})")
+    _masked_sn = SAMBANOVA_API_KEY[:8] + "..." + SAMBANOVA_API_KEY[-4:] if len(SAMBANOVA_API_KEY) > 12 else "***"
+    logger.info(f"SAMBANOVA_API_KEY caricata correttamente ({_masked_sn})")
 
 
-def _get_deepinfra_client() -> AsyncOpenAI:
-    global _deepinfra_client
-    if _deepinfra_client is None:
-        if not DEEPINFRA_API_KEY:
-            raise RuntimeError("DEEPINFRA_API_KEY non configurata")
-        _deepinfra_client = AsyncOpenAI(
-            base_url=DEEPINFRA_BASE_URL, api_key=DEEPINFRA_API_KEY, max_retries=0,
+def _get_sambanova_client() -> AsyncOpenAI:
+    global _sambanova_client
+    if _sambanova_client is None:
+        if not SAMBANOVA_API_KEY:
+            raise RuntimeError("SAMBANOVA_API_KEY non configurata")
+        _sambanova_client = AsyncOpenAI(
+            base_url=SAMBANOVA_BASE_URL, api_key=SAMBANOVA_API_KEY, max_retries=0,
             timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0),
         )
-    return _deepinfra_client
-
-
+    return _sambanova_client
 
 
 def _timeout_for_model(model: str) -> httpx.Timeout:
@@ -699,35 +699,35 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
-async def call_deepinfra_stream(messages: List[dict], model: str = None, temperature: float = 0.7,
+async def call_sambanova_stream(messages: List[dict], model: str = None, temperature: float = 0.7,
                                 max_tokens: int = None):
     """
-    Vera chiamata in streaming a DeepInfra (Llama 4 Scout) — stesso pattern di
-    call_nvidia_stream, stesso SDK (AsyncOpenAI), stesso convertitore messaggi
-    _to_openai_messages (DeepInfra è OpenAI-compatible). Async generator: yield
+    Vera chiamata in streaming a SambaNova Cloud (Llama 3.3 70B) — stesso pattern
+    di call_nvidia_stream, stesso SDK (AsyncOpenAI), stesso convertitore messaggi
+    _to_openai_messages (SambaNova è OpenAI-compatible). Async generator: yield
     di ogni pezzo di testo visibile appena arriva dal provider.
     """
-    if not DEEPINFRA_API_KEY:
-        logger.error("DeepInfra: richiesta bloccata PRIMA dell'invio - DEEPINFRA_API_KEY assente")
-        raise RuntimeError("DEEPINFRA_API_KEY non configurata")
+    if not SAMBANOVA_API_KEY:
+        logger.error("SambaNova: richiesta bloccata PRIMA dell'invio - SAMBANOVA_API_KEY assente")
+        raise RuntimeError("SAMBANOVA_API_KEY non configurata")
 
-    model = model or DEEPINFRA_TEXT_MODEL
-    max_tokens = max_tokens or DEEPINFRA_TEXT_MAX_TOKENS
-    client = _get_deepinfra_client()
+    model = model or SAMBANOVA_TEXT_MODEL
+    max_tokens = max_tokens or SAMBANOVA_TEXT_MAX_TOKENS
+    client = _get_sambanova_client()
     openai_messages = _to_openai_messages(messages)
 
-    async with deepinfra_concurrency:
-        await deepinfra_limiter.wait()
+    async with sambanova_concurrency:
+        await sambanova_limiter.wait()
         started = time.monotonic()
         content_chars = 0
         first_token_at = None
 
-        logger.info(f"DeepInfra: chiamata a '{model}' - max_tokens={max_tokens}, stream=True")
+        logger.info(f"SambaNova: chiamata a '{model}' - max_tokens={max_tokens}, stream=True")
         response = await client.chat.completions.create(
             model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
             max_tokens=max_tokens, stream=True,
         )
-        logger.info(f"DeepInfra: risposta HTTP ricevuta da '{model}' dopo {time.monotonic() - started:.1f}s, inizio lettura stream")
+        logger.info(f"SambaNova: risposta HTTP ricevuta da '{model}' dopo {time.monotonic() - started:.1f}s, inizio lettura stream")
 
         async for chunk in response:
             if not chunk.choices:
@@ -736,66 +736,66 @@ async def call_deepinfra_stream(messages: List[dict], model: str = None, tempera
             if delta.content:
                 if first_token_at is None:
                     first_token_at = time.monotonic() - started
-                    logger.info(f"DeepInfra: primo token visibile da '{model}' dopo {first_token_at:.1f}s")
+                    logger.info(f"SambaNova: primo token visibile da '{model}' dopo {first_token_at:.1f}s")
                 content_chars += len(delta.content)
                 yield delta.content
 
         elapsed = time.monotonic() - started
-        logger.info(f"DeepInfra: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili)")
+        logger.info(f"SambaNova: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili)")
 
 
-async def call_deepinfra_text(messages: List[dict], model: str = None, temperature: float = 0.7,
+async def call_sambanova_text(messages: List[dict], model: str = None, temperature: float = 0.7,
                               max_tokens: int = None, max_retries: int = 3) -> str:
     """
-    Wrapper: consuma call_deepinfra_stream e accumula tutto il testo, restituendolo
+    Wrapper: consuma call_sambanova_stream e accumula tutto il testo, restituendolo
     come blocco unico quando è completo — stesso ruolo di call_nvidia rispetto a
     call_nvidia_stream. Chiamata da /ai/generate per tutto il testo non-codice.
     """
-    model = model or DEEPINFRA_TEXT_MODEL
-    max_tokens = max_tokens or DEEPINFRA_TEXT_MAX_TOKENS
+    model = model or SAMBANOVA_TEXT_MODEL
+    max_tokens = max_tokens or SAMBANOVA_TEXT_MAX_TOKENS
     last_exc: Optional[Exception] = None
 
     for attempt in range(max_retries):
-        logger.info(f"DeepInfra: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
+        logger.info(f"SambaNova: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
         try:
             chunks = []
-            async for piece in call_deepinfra_stream(messages, model, temperature, max_tokens):
+            async for piece in call_sambanova_stream(messages, model, temperature, max_tokens):
                 chunks.append(piece)
             return "".join(chunks)
         except openai.AuthenticationError as e:
-            logger.error(f"DeepInfra: 401 - chiave sbagliata o revocata (model={model}): {e}")
-            raise RuntimeError(f"DeepInfra API key non valida o revocata: {e}") from e
+            logger.error(f"SambaNova: 401 - chiave sbagliata o revocata (model={model}): {e}")
+            raise RuntimeError(f"SambaNova API key non valida o revocata: {e}") from e
         except openai.BadRequestError as e:
-            logger.error(f"DeepInfra: 400 (model={model}): {e}")
-            raise RuntimeError(f"DeepInfra API richiesta non valida: {e}") from e
+            logger.error(f"SambaNova: 400 (model={model}): {e}")
+            raise RuntimeError(f"SambaNova API richiesta non valida: {e}") from e
         except openai.RateLimitError as e:
             last_exc = e
             if attempt < max_retries - 1:
                 wait_s = min(2 ** attempt * 2, 20)
-                logger.warning(f"DeepInfra 429 (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
+                logger.warning(f"SambaNova 429 (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
                 await asyncio.sleep(wait_s)
                 continue
             break
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             last_exc = e
             if attempt < max_retries - 1:
-                logger.warning(f"DeepInfra: connessione/timeout (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"SambaNova: connessione/timeout (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
                 await asyncio.sleep(2)
                 continue
             break
         except openai.InternalServerError as e:
             last_exc = e
             if attempt < max_retries - 1:
-                logger.warning(f"DeepInfra: errore server 5xx (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"SambaNova: errore server 5xx (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
                 await asyncio.sleep(3)
                 continue
             break
         except openai.APIStatusError as e:
-            logger.error(f"DeepInfra: errore {e.status_code} (model={model}): {e.message}")
+            logger.error(f"SambaNova: errore {e.status_code} (model={model}): {e.message}")
             last_exc = e
             break
 
-    raise RuntimeError(f"DeepInfra (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+    raise RuntimeError(f"SambaNova (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
                              max_tokens: int = 16384, thinking: bool = False):
@@ -1182,11 +1182,12 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
                 max_tokens=NVIDIA_CODE_MAX_TOKENS, thinking=True,
             ))
         else:
-            # Testo: ora su DeepInfra / Llama 4 Scout
-            task = asyncio.create_task(call_deepinfra_text(
-                messages, model=DEEPINFRA_TEXT_MODEL, temperature=0.7,
-                max_tokens=DEEPINFRA_TEXT_MAX_TOKENS,
+            # Testo: ora su SambaNova Cloud / Llama 3.3 70B
+            task = asyncio.create_task(call_sambanova_text(
+                messages, model=SAMBANOVA_TEXT_MODEL, temperature=0.7,
+                max_tokens=SAMBANOVA_TEXT_MAX_TOKENS,
             ))
+            
         
         try:
             while not task.done():
@@ -1204,7 +1205,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
         used = await get_usage_today(user.user_id)
         payload = {
             "content": content,
-            "provider": "kimi-k3" if is_code else "llama-4-scout",
+            "provider": "kimi-k3" if is_code else "llama-3.3-70b",
             "usage_used": used,
             "usage_limit": daily_limit_for(user.plan),
         }
