@@ -1196,7 +1196,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     thinking = True if is_code else False
 
     async def body_stream():
-        if is_code():
+        if is_code:
             task = asyncio.create_task(call_nvidia(
                 messages, model=NVIDIA_CODE_MODEL, temperature=0.3,
                 max_tokens=NVIDIA_CODE_MAX_TOKENS, thinking=True,
