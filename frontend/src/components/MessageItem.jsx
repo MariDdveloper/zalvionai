@@ -105,7 +105,7 @@ function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, onOpen
                       </ReactMarkdown>
                     );
                   })}
-                  {pending && <BuildingCard />}
+                  {pending && isStreaming && <BuildingCard />}
                 </>
               );
             })()}
