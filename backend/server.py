@@ -49,7 +49,7 @@ SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'noreply@getzalvion.com')
 resend.api_key = RESEND_API_KEY
 
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
+EXA_API_KEY = os.environ.get('EXA_API_KEY')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # =====================================================================================
 # AWS BEDROCK — PROVIDER TESTO (Amazon Nova Lite)
@@ -58,8 +58,8 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # Bedrock/Nova Lite gestisce ora tutte le richieste di testo non-codice: più veloce
 # di NVIDIA NIM su questo carico. Region di default us-east-1 (dove Nova Lite è
 # disponibile on-demand senza inference profile dedicato in molti account).
-AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', 'AKIAYV3ZF6QESI6C2NPC')
-AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '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')
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 BEDROCK_TEXT_MODEL = os.environ.get('BEDROCK_TEXT_MODEL', 'amazon.nova-lite-v1:0')
 BEDROCK_TEXT_MAX_TOKENS = int(os.environ.get('BEDROCK_TEXT_MAX_TOKENS', '4096'))
@@ -72,7 +72,7 @@ BEDROCK_TEXT_MAX_TOKENS = int(os.environ.get('BEDROCK_TEXT_MAX_TOKENS', '4096'))
 # NB CRITICO: MAI mettere una chiave hardcoded come default qui - solo env var.
 # Se questa riga ha mai contenuto una chiave vera, quella chiave va revocata SUBITO
 # su build.nvidia.com/settings/api-keys, indipendentemente da questo fix.
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
