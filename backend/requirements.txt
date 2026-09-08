@@ -9,4 +9,5 @@ google-auth
 email-validator
 gTTS
 exa-py
+boto3
 
