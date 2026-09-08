@@ -57,8 +57,8 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # Bedrock/Nova Lite gestisce ora tutte le richieste di testo non-codice: più veloce
 # di NVIDIA NIM su questo carico. Region di default us-east-1 (dove Nova Lite è
 # disponibile on-demand senza inference profile dedicato in molti account).
-AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', 'AKIAYV3ZF6QEW2WTB23K')
-AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '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')
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', 'AKIAYV3ZF6QESI6C2NPC')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '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')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 BEDROCK_TEXT_MODEL = os.environ.get('BEDROCK_TEXT_MODEL', 'amazon.nova-lite-v1:0')
 BEDROCK_TEXT_MAX_TOKENS = int(os.environ.get('BEDROCK_TEXT_MAX_TOKENS', '4096'))
