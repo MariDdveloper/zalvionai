@@ -47,6 +47,18 @@ resend.api_key = RESEND_API_KEY
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
+# =====================================================================================
+# AWS BEDROCK — PROVIDER TESTO (Amazon Nova Lite)
+# =====================================================================================
+# NVIDIA NIM resta invariato e viene usato SOLO per il codice (Kimi K3, vedi sopra).
+# Bedrock/Nova Lite gestisce ora tutte le richieste di testo non-codice: più veloce
+# di NVIDIA NIM su questo carico. Region di default us-east-1 (dove Nova Lite è
+# disponibile on-demand senza inference profile dedicato in molti account).
+AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', 'AKIAYV3ZF6QEW2WTB23K')
+AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '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')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+BEDROCK_TEXT_MODEL = os.environ.get('BEDROCK_TEXT_MODEL', 'amazon.nova-lite-v1:0')
+BEDROCK_TEXT_MAX_TOKENS = int(os.environ.get('BEDROCK_TEXT_MAX_TOKENS', '4096'))
 
 # =====================================================================================
 # NVIDIA NIM — UNICO PROVIDER AI DI ZALVION (testo + codice)
@@ -619,6 +631,36 @@ def _get_nvidia_client() -> AsyncOpenAI:
             timeout=httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=30.0),
         )
     return _nvidia_client
+BEDROCK_RPS = float(os.environ.get('BEDROCK_RPS', '5.0'))
+bedrock_limiter = RateLimiter(rps=BEDROCK_RPS)
+bedrock_concurrency = asyncio.Semaphore(8)
+
+_bedrock_client = None
+
+if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+    logger.error("⚠️  AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY NON CONFIGURATE — le richieste di testo (Nova Lite) falliranno.")
+else:
+    _masked_aws = AWS_ACCESS_KEY_ID[:4] + "..." + AWS_ACCESS_KEY_ID[-4:] if len(AWS_ACCESS_KEY_ID) > 8 else "***"
+    logger.info(f"AWS Bedrock: credenziali caricate correttamente ({_masked_aws}, region={AWS_REGION})")
+
+
+def _get_bedrock_client():
+    global _bedrock_client
+    if _bedrock_client is None:
+        if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+            raise RuntimeError("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY non configurate")
+        _bedrock_client = boto3.client(
+            "bedrock-runtime",
+            region_name=AWS_REGION,
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            config=BotoConfig(
+                connect_timeout=15,
+                read_timeout=120,
+                retries={"max_attempts": 0},  # i retry li gestiamo noi in call_bedrock_text
+            ),
+        )
+    return _bedrock_client
 
 
 def _timeout_for_model(model: str) -> httpx.Timeout:
@@ -640,6 +682,7 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
     return body
 
 
+
 def _to_openai_messages(messages: List[dict]) -> List[dict]:
     converted = []
     for m in messages:
@@ -657,6 +700,119 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
+def _to_bedrock_messages(messages: List[dict]):
+    """
+    Converte la lista messaggi interna (stesso formato usato per NVIDIA) nel
+    formato richiesto dalla Converse API di Bedrock: system a parte, e
+    messages come lista di {"role": "user"/"assistant", "content": [{"text": ...}]}.
+    Bedrock richiede che il primo messaggio sia "user" — se non lo è (storico
+    troncato che inizia per caso con un assistant), inseriamo un filler.
+    """
+    system_blocks = []
+    bedrock_messages = []
+    for m in messages:
+        role = m["role"]
+        content = m["content"]
+        if role == "system":
+            text = content if isinstance(content, str) else "\n".join(
+                p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+            )
+            if text:
+                system_blocks.append({"text": text})
+            continue
+
+        if isinstance(content, str):
+            text = content
+        else:
+            chunks = []
+            for part in content:
+                if part.get("type") == "text":
+                    chunks.append(part["text"])
+                elif part.get("type") == "image_url":
+                    chunks.append("[Allegato immagine ricevuto: analisi immagini temporaneamente non disponibile]")
+                elif part.get("type") == "document_url":
+                    chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
+            text = "\n".join(chunks)
+
+        bedrock_role = "assistant" if role == "assistant" else "user"
+        bedrock_messages.append({"role": bedrock_role, "content": [{"text": text or " "}]})
+
+    if bedrock_messages and bedrock_messages[0]["role"] != "user":
+        bedrock_messages.insert(0, {"role": "user", "content": [{"text": " "}]})
+
+    return system_blocks, bedrock_messages
+
+
+def _is_bedrock_retryable(exc: Exception) -> bool:
+    if isinstance(exc, BotoCoreError):
+        return True
+    code = exc.response.get("Error", {}).get("Code", "") if isinstance(exc, ClientError) else ""
+    return code in (
+        "ThrottlingException", "TooManyRequestsException",
+        "ServiceUnavailableException", "ModelTimeoutException",
+        "InternalServerException",
+    )
+
+
+async def call_bedrock_text(messages: List[dict], model: str = None, temperature: float = 0.7,
+                            max_tokens: int = None, max_retries: int = 3) -> str:
+    """
+    Amazon Nova Lite via AWS Bedrock Converse API — provider di TESTO di Zalvion.
+    Il codice resta interamente su NVIDIA NIM / Kimi K3 (call_nvidia, invariata).
+    Chiamata sincrona di boto3 eseguita in thread pool (asyncio.to_thread) per non
+    bloccare l'event loop — Nova Lite risponde tipicamente in pochi secondi, quindi
+    a differenza di call_nvidia_stream qui non serve un vero streaming incrementale:
+    il chiamante (ai_generate) gestisce già il keep-alive verso il frontend mentre
+    attende il task, esattamente come fa con call_nvidia.
+    """
+    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
+        logger.error("AWS Bedrock: richiesta bloccata PRIMA dell'invio - credenziali assenti")
+        raise RuntimeError("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY non configurate")
+
+    model = model or BEDROCK_TEXT_MODEL
+    max_tokens = max_tokens or BEDROCK_TEXT_MAX_TOKENS
+    system_blocks, bedrock_messages = _to_bedrock_messages(messages)
+    client = _get_bedrock_client()
+
+    def _invoke():
+        kwargs = dict(
+            modelId=model,
+            messages=bedrock_messages,
+            inferenceConfig={"maxTokens": max_tokens, "temperature": temperature, "topP": 0.9},
+        )
+        if system_blocks:
+            kwargs["system"] = system_blocks
+        return client.converse(**kwargs)
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        async with bedrock_concurrency:
+            await bedrock_limiter.wait()
+            started = time.monotonic()
+            logger.info(f"AWS Bedrock: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
+            try:
+                response = await asyncio.to_thread(_invoke)
+                elapsed = time.monotonic() - started
+                output_message = response.get("output", {}).get("message", {})
+                text_parts = [c["text"] for c in output_message.get("content", []) if "text" in c]
+                content = "".join(text_parts)
+                usage = response.get("usage", {})
+                logger.info(
+                    f"AWS Bedrock: risposta da '{model}' in {elapsed:.1f}s "
+                    f"({len(content)} caratteri, input_tokens={usage.get('inputTokens')}, output_tokens={usage.get('outputTokens')})"
+                )
+                return content
+            except (ClientError, BotoCoreError) as e:
+                last_exc = e
+                if _is_bedrock_retryable(e) and attempt < max_retries - 1:
+                    wait_s = min(2 ** attempt * 2, 20)
+                    logger.warning(f"AWS Bedrock: errore temporaneo su '{model}' (tentativo {attempt + 1}/{max_retries}), attesa {wait_s}s: {e}")
+                    await asyncio.sleep(wait_s)
+                    continue
+                logger.error(f"AWS Bedrock: errore su '{model}': {e}")
+                break
+
+    raise RuntimeError(f"AWS Bedrock (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
@@ -1037,10 +1193,18 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     thinking = True if is_code else False
 
     async def body_stream():
-        task = asyncio.create_task(call_nvidia(
-            messages, model=model, temperature=temperature,
-            max_tokens=max_tokens, thinking=thinking,
-        ))
+        if is_code():
+            task = asyncio.create_task(call_nvidia(
+                messages, model=NVIDIA_CODE_MODEL, temperature=0.3,
+                max_tokens=NVIDIA_CODE_MAX_TOKENS, thinking=True,
+            ))
+        else:
+            # Testo: ora su AWS Bedrock / Amazon Nova Lite
+            task = asyncio.create_task(call_bedrock_text(
+                messages, model=BEDROCK_TEXT_MODEL, temperature=0.7,
+                max_tokens=BEDROCK_TEXT_MAX_TOKENS,
+            ))
+        
         try:
             while not task.done():
                 try:
