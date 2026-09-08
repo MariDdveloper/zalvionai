@@ -757,16 +757,14 @@ def _is_bedrock_retryable(exc: Exception) -> bool:
     )
 
 
-async def call_bedrock_text(messages: List[dict], model: str = None, temperature: float = 0.7,
-                            max_tokens: int = None, max_retries: int = 3) -> str:
+async def call_bedrock_stream(messages: List[dict], model: str = None, temperature: float = 0.7,
+                              max_tokens: int = None):
     """
-    Amazon Nova Lite via AWS Bedrock Converse API — provider di TESTO di Zalvion.
-    Il codice resta interamente su NVIDIA NIM / Kimi K3 (call_nvidia, invariata).
-    Chiamata sincrona di boto3 eseguita in thread pool (asyncio.to_thread) per non
-    bloccare l'event loop — Nova Lite risponde tipicamente in pochi secondi, quindi
-    a differenza di call_nvidia_stream qui non serve un vero streaming incrementale:
-    il chiamante (ai_generate) gestisce già il keep-alive verso il frontend mentre
-    attende il task, esattamente come fa con call_nvidia.
+    Vera chiamata in streaming a Bedrock (converse_stream) per Amazon Nova Lite.
+    boto3 è sincrono e il suo EventStream di risposta è un iteratore bloccante:
+    la lettura avviene in un thread dedicato che spinge ogni chunk di testo su
+    una asyncio.Queue; questo async generator legge dalla queue e fa yield in
+    modo nativo, esattamente come call_nvidia_stream fa con l'SDK OpenAI.
     """
     if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
         logger.error("AWS Bedrock: richiesta bloccata PRIMA dell'invio - credenziali assenti")
@@ -777,43 +775,87 @@ async def call_bedrock_text(messages: List[dict], model: str = None, temperature
     system_blocks, bedrock_messages = _to_bedrock_messages(messages)
     client = _get_bedrock_client()
 
-    def _invoke():
-        kwargs = dict(
-            modelId=model,
-            messages=bedrock_messages,
-            inferenceConfig={"maxTokens": max_tokens, "temperature": temperature, "topP": 0.9},
-        )
-        if system_blocks:
-            kwargs["system"] = system_blocks
-        return client.converse(**kwargs)
+    async with bedrock_concurrency:
+        await bedrock_limiter.wait()
+        started = time.monotonic()
+        logger.info(f"AWS Bedrock: chiamata a '{model}' - max_tokens={max_tokens}, stream=True")
 
-    last_exc: Optional[Exception] = None
-    for attempt in range(max_retries):
-        async with bedrock_concurrency:
-            await bedrock_limiter.wait()
-            started = time.monotonic()
-            logger.info(f"AWS Bedrock: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
+
+        def _run_stream():
             try:
-                response = await asyncio.to_thread(_invoke)
-                elapsed = time.monotonic() - started
-                output_message = response.get("output", {}).get("message", {})
-                text_parts = [c["text"] for c in output_message.get("content", []) if "text" in c]
-                content = "".join(text_parts)
-                usage = response.get("usage", {})
-                logger.info(
-                    f"AWS Bedrock: risposta da '{model}' in {elapsed:.1f}s "
-                    f"({len(content)} caratteri, input_tokens={usage.get('inputTokens')}, output_tokens={usage.get('outputTokens')})"
+                kwargs = dict(
+                    modelId=model,
+                    messages=bedrock_messages,
+                    inferenceConfig={"maxTokens": max_tokens, "temperature": temperature, "topP": 0.9},
                 )
-                return content
-            except (ClientError, BotoCoreError) as e:
-                last_exc = e
-                if _is_bedrock_retryable(e) and attempt < max_retries - 1:
-                    wait_s = min(2 ** attempt * 2, 20)
-                    logger.warning(f"AWS Bedrock: errore temporaneo su '{model}' (tentativo {attempt + 1}/{max_retries}), attesa {wait_s}s: {e}")
-                    await asyncio.sleep(wait_s)
-                    continue
-                logger.error(f"AWS Bedrock: errore su '{model}': {e}")
+                if system_blocks:
+                    kwargs["system"] = system_blocks
+                response = client.converse_stream(**kwargs)
+                for event in response["stream"]:
+                    if "contentBlockDelta" in event:
+                        text = event["contentBlockDelta"].get("delta", {}).get("text")
+                        if text:
+                            asyncio.run_coroutine_threadsafe(queue.put(text), loop)
+                    elif "messageStop" in event:
+                        break
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+            finally:
+                asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop)
+
+        threading.Thread(target=_run_stream, daemon=True).start()
+
+        content_chars = 0
+        first_token_at = None
+        while True:
+            item = await queue.get()
+            if item is SENTINEL:
                 break
+            if isinstance(item, Exception):
+                raise item
+            if first_token_at is None:
+                first_token_at = time.monotonic() - started
+                logger.info(f"AWS Bedrock: primo token visibile da '{model}' dopo {first_token_at:.1f}s")
+            content_chars += len(item)
+            yield item
+
+        elapsed = time.monotonic() - started
+        logger.info(f"AWS Bedrock: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili)")
+
+
+async def call_bedrock_text(messages: List[dict], model: str = None, temperature: float = 0.7,
+                            max_tokens: int = None, max_retries: int = 3) -> str:
+    """
+    Wrapper: consuma call_bedrock_stream e accumula tutto il testo, restituendolo
+    come blocco unico quando è completo — stesso ruolo di call_nvidia rispetto a
+    call_nvidia_stream. Chiamata dall'endpoint /ai/generate, invariata all'esterno.
+    """
+    model = model or BEDROCK_TEXT_MODEL
+    max_tokens = max_tokens or BEDROCK_TEXT_MAX_TOKENS
+    last_exc: Optional[Exception] = None
+
+    for attempt in range(max_retries):
+        logger.info(f"AWS Bedrock: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
+        try:
+            chunks = []
+            async for piece in call_bedrock_stream(messages, model, temperature, max_tokens):
+                chunks.append(piece)
+            return "".join(chunks)
+        except (ClientError, BotoCoreError) as e:
+            last_exc = e
+            if _is_bedrock_retryable(e) and attempt < max_retries - 1:
+                wait_s = min(2 ** attempt * 2, 20)
+                logger.warning(f"AWS Bedrock: errore temporaneo su '{model}' (tentativo {attempt + 1}/{max_retries}), attesa {wait_s}s: {e}")
+                await asyncio.sleep(wait_s)
+                continue
+            logger.error(f"AWS Bedrock: errore su '{model}': {e}")
+            break
+        except RuntimeError as e:
+            # credenziali assenti - non ha senso riprovare
+            raise
 
     raise RuntimeError(f"AWS Bedrock (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
