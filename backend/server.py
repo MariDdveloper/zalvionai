@@ -1174,19 +1174,11 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     max_tokens = NVIDIA_CODE_MAX_TOKENS if is_code else 4096
     thinking = True if is_code else False
 
-    async def body_stream():
-        if is_code:
-            # Codice: invariato, resta su NVIDIA NIM / Kimi K3
-            task = asyncio.create_task(call_nvidia(
-                messages, model=NVIDIA_CODE_MODEL, temperature=0.3,
-                max_tokens=NVIDIA_CODE_MAX_TOKENS, thinking=True,
-            ))
-        else:
-            # Testo: ora su SambaNova Cloud / Llama 3.3 70B
-            task = asyncio.create_task(call_sambanova_text(
-                messages, model=SAMBANOVA_TEXT_MODEL, temperature=0.7,
-                max_tokens=SAMBANOVA_TEXT_MAX_TOKENS,
-            ))
+   async def body_stream():
+        task = asyncio.create_task(call_nvidia(
+            messages, model=model, temperature=temperature,
+            max_tokens=max_tokens, thinking=thinking,
+        ))
             
         
         try:
@@ -1205,7 +1197,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
         used = await get_usage_today(user.user_id)
         payload = {
             "content": content,
-            "provider": "kimi-k3" if is_code else "llama-3.3-70b",
+            "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
             "usage_used": used,
             "usage_limit": daily_limit_for(user.plan),
         }
