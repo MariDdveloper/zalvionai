@@ -24,9 +24,7 @@ from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
 from exa_py import AsyncExa
-import boto3
-from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError, BotoCoreError
+
 
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_auth_requests
@@ -58,11 +56,13 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 # Bedrock/Nova Lite gestisce ora tutte le richieste di testo non-codice: più veloce
 # di NVIDIA NIM su questo carico. Region di default us-east-1 (dove Nova Lite è
 # disponibile on-demand senza inference profile dedicato in molti account).
-AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
-AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
-BEDROCK_TEXT_MODEL = os.environ.get('BEDROCK_TEXT_MODEL', 'amazon.nova-lite-v1:0')
-BEDROCK_TEXT_MAX_TOKENS = int(os.environ.get('BEDROCK_TEXT_MAX_TOKENS', '4096'))
+# =====================================================================================
+# DEEPINFRA — PROVIDER TESTO (Llama 4 Scout 17B) — NVIDIA NIM resta invariato per il codice
+# =====================================================================================
+DEEPINFRA_API_KEY = os.environ.get('DEEPINFRA_API_KEY')
+DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+DEEPINFRA_TEXT_MODEL = os.environ.get('DEEPINFRA_TEXT_MODEL', 'meta-llama/Llama-4-Scout-17B-16E-Instruct')
+DEEPINFRA_TEXT_MAX_TOKENS = int(os.environ.get('DEEPINFRA_TEXT_MAX_TOKENS', '4096'))
 
 # =====================================================================================
 # NVIDIA NIM — UNICO PROVIDER AI DI ZALVION (testo + codice)
@@ -635,36 +635,31 @@ def _get_nvidia_client() -> AsyncOpenAI:
             timeout=httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=30.0),
         )
     return _nvidia_client
-BEDROCK_RPS = float(os.environ.get('BEDROCK_RPS', '5.0'))
-bedrock_limiter = RateLimiter(rps=BEDROCK_RPS)
-bedrock_concurrency = asyncio.Semaphore(8)
+DEEPINFRA_RPS = float(os.environ.get('DEEPINFRA_RPS', '10.0'))
+deepinfra_limiter = RateLimiter(rps=DEEPINFRA_RPS)
+deepinfra_concurrency = asyncio.Semaphore(8)
 
-_bedrock_client = None
+_deepinfra_client: Optional[AsyncOpenAI] = None
 
-if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-    logger.error("⚠️  AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY NON CONFIGURATE — le richieste di testo (Nova Lite) falliranno.")
+if not DEEPINFRA_API_KEY:
+    logger.error("⚠️  DEEPINFRA_API_KEY NON CONFIGURATA — le richieste di testo (Llama 4 Scout) falliranno.")
 else:
-    _masked_aws = AWS_ACCESS_KEY_ID[:4] + "..." + AWS_ACCESS_KEY_ID[-4:] if len(AWS_ACCESS_KEY_ID) > 8 else "***"
-    logger.info(f"AWS Bedrock: credenziali caricate correttamente ({_masked_aws}, region={AWS_REGION})")
+    _masked_di = DEEPINFRA_API_KEY[:8] + "..." + DEEPINFRA_API_KEY[-4:] if len(DEEPINFRA_API_KEY) > 12 else "***"
+    logger.info(f"DEEPINFRA_API_KEY caricata correttamente ({_masked_di})")
 
 
-def _get_bedrock_client():
-    global _bedrock_client
-    if _bedrock_client is None:
-        if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-            raise RuntimeError("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY non configurate")
-        _bedrock_client = boto3.client(
-            "bedrock-runtime",
-            region_name=AWS_REGION,
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-            config=BotoConfig(
-                connect_timeout=15,
-                read_timeout=120,
-                retries={"max_attempts": 0},  # i retry li gestiamo noi in call_bedrock_text
-            ),
+def _get_deepinfra_client() -> AsyncOpenAI:
+    global _deepinfra_client
+    if _deepinfra_client is None:
+        if not DEEPINFRA_API_KEY:
+            raise RuntimeError("DEEPINFRA_API_KEY non configurata")
+        _deepinfra_client = AsyncOpenAI(
+            base_url=DEEPINFRA_BASE_URL, api_key=DEEPINFRA_API_KEY, max_retries=0,
+            timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0),
         )
-    return _bedrock_client
+    return _deepinfra_client
+
+
 
 
 def _timeout_for_model(model: str) -> httpx.Timeout:
@@ -704,162 +699,103 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
-def _to_bedrock_messages(messages: List[dict]):
+async def call_deepinfra_stream(messages: List[dict], model: str = None, temperature: float = 0.7,
+                                max_tokens: int = None):
     """
-    Converte la lista messaggi interna (stesso formato usato per NVIDIA) nel
-    formato richiesto dalla Converse API di Bedrock: system a parte, e
-    messages come lista di {"role": "user"/"assistant", "content": [{"text": ...}]}.
-    Bedrock richiede che il primo messaggio sia "user" — se non lo è (storico
-    troncato che inizia per caso con un assistant), inseriamo un filler.
+    Vera chiamata in streaming a DeepInfra (Llama 4 Scout) — stesso pattern di
+    call_nvidia_stream, stesso SDK (AsyncOpenAI), stesso convertitore messaggi
+    _to_openai_messages (DeepInfra è OpenAI-compatible). Async generator: yield
+    di ogni pezzo di testo visibile appena arriva dal provider.
     """
-    system_blocks = []
-    bedrock_messages = []
-    for m in messages:
-        role = m["role"]
-        content = m["content"]
-        if role == "system":
-            text = content if isinstance(content, str) else "\n".join(
-                p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-            )
-            if text:
-                system_blocks.append({"text": text})
-            continue
+    if not DEEPINFRA_API_KEY:
+        logger.error("DeepInfra: richiesta bloccata PRIMA dell'invio - DEEPINFRA_API_KEY assente")
+        raise RuntimeError("DEEPINFRA_API_KEY non configurata")
 
-        if isinstance(content, str):
-            text = content
-        else:
-            chunks = []
-            for part in content:
-                if part.get("type") == "text":
-                    chunks.append(part["text"])
-                elif part.get("type") == "image_url":
-                    chunks.append("[Allegato immagine ricevuto: analisi immagini temporaneamente non disponibile]")
-                elif part.get("type") == "document_url":
-                    chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
-            text = "\n".join(chunks)
+    model = model or DEEPINFRA_TEXT_MODEL
+    max_tokens = max_tokens or DEEPINFRA_TEXT_MAX_TOKENS
+    client = _get_deepinfra_client()
+    openai_messages = _to_openai_messages(messages)
 
-        bedrock_role = "assistant" if role == "assistant" else "user"
-        bedrock_messages.append({"role": bedrock_role, "content": [{"text": text or " "}]})
-
-    if bedrock_messages and bedrock_messages[0]["role"] != "user":
-        bedrock_messages.insert(0, {"role": "user", "content": [{"text": " "}]})
-
-    return system_blocks, bedrock_messages
-
-
-def _is_bedrock_retryable(exc: Exception) -> bool:
-    if isinstance(exc, BotoCoreError):
-        return True
-    code = exc.response.get("Error", {}).get("Code", "") if isinstance(exc, ClientError) else ""
-    return code in (
-        "ThrottlingException", "TooManyRequestsException",
-        "ServiceUnavailableException", "ModelTimeoutException",
-        "InternalServerException",
-    )
-
-
-async def call_bedrock_stream(messages: List[dict], model: str = None, temperature: float = 0.7,
-                              max_tokens: int = None):
-    """
-    Vera chiamata in streaming a Bedrock (converse_stream) per Amazon Nova Lite.
-    boto3 è sincrono e il suo EventStream di risposta è un iteratore bloccante:
-    la lettura avviene in un thread dedicato che spinge ogni chunk di testo su
-    una asyncio.Queue; questo async generator legge dalla queue e fa yield in
-    modo nativo, esattamente come call_nvidia_stream fa con l'SDK OpenAI.
-    """
-    if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
-        logger.error("AWS Bedrock: richiesta bloccata PRIMA dell'invio - credenziali assenti")
-        raise RuntimeError("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY non configurate")
-
-    model = model or BEDROCK_TEXT_MODEL
-    max_tokens = max_tokens or BEDROCK_TEXT_MAX_TOKENS
-    system_blocks, bedrock_messages = _to_bedrock_messages(messages)
-    client = _get_bedrock_client()
-
-    async with bedrock_concurrency:
-        await bedrock_limiter.wait()
+    async with deepinfra_concurrency:
+        await deepinfra_limiter.wait()
         started = time.monotonic()
-        logger.info(f"AWS Bedrock: chiamata a '{model}' - max_tokens={max_tokens}, stream=True")
-
-        loop = asyncio.get_event_loop()
-        queue: asyncio.Queue = asyncio.Queue()
-        SENTINEL = object()
-
-        def _run_stream():
-            try:
-                kwargs = dict(
-                    modelId=model,
-                    messages=bedrock_messages,
-                    inferenceConfig={"maxTokens": max_tokens, "temperature": temperature, "topP": 0.9},
-                )
-                if system_blocks:
-                    kwargs["system"] = system_blocks
-                response = client.converse_stream(**kwargs)
-                for event in response["stream"]:
-                    if "contentBlockDelta" in event:
-                        text = event["contentBlockDelta"].get("delta", {}).get("text")
-                        if text:
-                            asyncio.run_coroutine_threadsafe(queue.put(text), loop)
-                    elif "messageStop" in event:
-                        break
-            except Exception as e:
-                asyncio.run_coroutine_threadsafe(queue.put(e), loop)
-            finally:
-                asyncio.run_coroutine_threadsafe(queue.put(SENTINEL), loop)
-
-        threading.Thread(target=_run_stream, daemon=True).start()
-
         content_chars = 0
         first_token_at = None
-        while True:
-            item = await queue.get()
-            if item is SENTINEL:
-                break
-            if isinstance(item, Exception):
-                raise item
-            if first_token_at is None:
-                first_token_at = time.monotonic() - started
-                logger.info(f"AWS Bedrock: primo token visibile da '{model}' dopo {first_token_at:.1f}s")
-            content_chars += len(item)
-            yield item
+
+        logger.info(f"DeepInfra: chiamata a '{model}' - max_tokens={max_tokens}, stream=True")
+        response = await client.chat.completions.create(
+            model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
+            max_tokens=max_tokens, stream=True,
+        )
+        logger.info(f"DeepInfra: risposta HTTP ricevuta da '{model}' dopo {time.monotonic() - started:.1f}s, inizio lettura stream")
+
+        async for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                if first_token_at is None:
+                    first_token_at = time.monotonic() - started
+                    logger.info(f"DeepInfra: primo token visibile da '{model}' dopo {first_token_at:.1f}s")
+                content_chars += len(delta.content)
+                yield delta.content
 
         elapsed = time.monotonic() - started
-        logger.info(f"AWS Bedrock: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili)")
+        logger.info(f"DeepInfra: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili)")
 
 
-async def call_bedrock_text(messages: List[dict], model: str = None, temperature: float = 0.7,
-                            max_tokens: int = None, max_retries: int = 3) -> str:
+async def call_deepinfra_text(messages: List[dict], model: str = None, temperature: float = 0.7,
+                              max_tokens: int = None, max_retries: int = 3) -> str:
     """
-    Wrapper: consuma call_bedrock_stream e accumula tutto il testo, restituendolo
+    Wrapper: consuma call_deepinfra_stream e accumula tutto il testo, restituendolo
     come blocco unico quando è completo — stesso ruolo di call_nvidia rispetto a
-    call_nvidia_stream. Chiamata dall'endpoint /ai/generate, invariata all'esterno.
+    call_nvidia_stream. Chiamata da /ai/generate per tutto il testo non-codice.
     """
-    model = model or BEDROCK_TEXT_MODEL
-    max_tokens = max_tokens or BEDROCK_TEXT_MAX_TOKENS
+    model = model or DEEPINFRA_TEXT_MODEL
+    max_tokens = max_tokens or DEEPINFRA_TEXT_MAX_TOKENS
     last_exc: Optional[Exception] = None
 
     for attempt in range(max_retries):
-        logger.info(f"AWS Bedrock: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
+        logger.info(f"DeepInfra: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
         try:
             chunks = []
-            async for piece in call_bedrock_stream(messages, model, temperature, max_tokens):
+            async for piece in call_deepinfra_stream(messages, model, temperature, max_tokens):
                 chunks.append(piece)
             return "".join(chunks)
-        except (ClientError, BotoCoreError) as e:
+        except openai.AuthenticationError as e:
+            logger.error(f"DeepInfra: 401 - chiave sbagliata o revocata (model={model}): {e}")
+            raise RuntimeError(f"DeepInfra API key non valida o revocata: {e}") from e
+        except openai.BadRequestError as e:
+            logger.error(f"DeepInfra: 400 (model={model}): {e}")
+            raise RuntimeError(f"DeepInfra API richiesta non valida: {e}") from e
+        except openai.RateLimitError as e:
             last_exc = e
-            if _is_bedrock_retryable(e) and attempt < max_retries - 1:
+            if attempt < max_retries - 1:
                 wait_s = min(2 ** attempt * 2, 20)
-                logger.warning(f"AWS Bedrock: errore temporaneo su '{model}' (tentativo {attempt + 1}/{max_retries}), attesa {wait_s}s: {e}")
+                logger.warning(f"DeepInfra 429 (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
                 await asyncio.sleep(wait_s)
                 continue
-            logger.error(f"AWS Bedrock: errore su '{model}': {e}")
             break
-        except RuntimeError as e:
-            # credenziali assenti - non ha senso riprovare
-            raise
+        except (openai.APIConnectionError, openai.APITimeoutError) as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                logger.warning(f"DeepInfra: connessione/timeout (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                await asyncio.sleep(2)
+                continue
+            break
+        except openai.InternalServerError as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                logger.warning(f"DeepInfra: errore server 5xx (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                await asyncio.sleep(3)
+                continue
+            break
+        except openai.APIStatusError as e:
+            logger.error(f"DeepInfra: errore {e.status_code} (model={model}): {e.message}")
+            last_exc = e
+            break
 
-    raise RuntimeError(f"AWS Bedrock (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
-
+    raise RuntimeError(f"DeepInfra (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
                              max_tokens: int = 16384, thinking: bool = False):
@@ -1240,15 +1176,16 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
 
     async def body_stream():
         if is_code:
+            # Codice: invariato, resta su NVIDIA NIM / Kimi K3
             task = asyncio.create_task(call_nvidia(
                 messages, model=NVIDIA_CODE_MODEL, temperature=0.3,
                 max_tokens=NVIDIA_CODE_MAX_TOKENS, thinking=True,
             ))
         else:
-            # Testo: ora su AWS Bedrock / Amazon Nova Lite
-            task = asyncio.create_task(call_bedrock_text(
-                messages, model=BEDROCK_TEXT_MODEL, temperature=0.7,
-                max_tokens=BEDROCK_TEXT_MAX_TOKENS,
+            # Testo: ora su DeepInfra / Llama 4 Scout
+            task = asyncio.create_task(call_deepinfra_text(
+                messages, model=DEEPINFRA_TEXT_MODEL, temperature=0.7,
+                max_tokens=DEEPINFRA_TEXT_MAX_TOKENS,
             ))
         
         try:
@@ -1267,7 +1204,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
         used = await get_usage_today(user.user_id)
         payload = {
             "content": content,
-            "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
+            "provider": "kimi-k3" if is_code else "llama-4-scout",
             "usage_used": used,
             "usage_limit": daily_limit_for(user.plan),
         }
