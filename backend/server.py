@@ -60,7 +60,7 @@ NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', 'nvapi-PYhkpub0sCLVy7e5jLfSXu2
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
-NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
+NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '32000'))
 MAX_HISTORY_MESSAGES = 16
 
 
@@ -1034,7 +1034,7 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
     temperature = 0.3 if is_code else 0.7
     max_tokens = NVIDIA_CODE_MAX_TOKENS if is_code else 4096
-    thinking = True if is_code else False
+    thinking = False
 
     async def body_stream():
         task = asyncio.create_task(call_nvidia(
