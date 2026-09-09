@@ -60,7 +60,7 @@ NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', 'nvapi-PYhkpub0sCLVy7e5jLfSXu2
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
-NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '32000'))
+NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
 MAX_HISTORY_MESSAGES = 16
 
 
@@ -1011,18 +1011,60 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
         else:
             messages.append({"role": m.role, "content": parts})
     return messages
+# =====================================================================================
+# JOB STORE PER GENERAZIONE ASINCRONA — evita di tenere aperta una singola richiesta
+# HTTP per tutta la durata della generazione (rischio di 504 lato proxy/browser
+# indipendente dai 504 che puo' restituire NVIDIA stessa). Il client fa POST
+# /ai/generate/start (risposta immediata con job_id) e poi polling su
+# /ai/generate/status/{job_id} ogni paio di secondi finche' non e' "done"/"error".
+# In-memory: va bene perche' il servizio gira con un solo worker uvicorn
+# (uvicorn server:app, nessun --workers > 1); se in futuro si passa a piu'
+# worker/processi bisognera' spostare questo store su Redis o Supabase.
+# =====================================================================================
+_ai_jobs: dict = {}
+_AI_JOB_TTL_SECONDS = 30 * 60  # 30 minuti, poi il job viene scartato dalla cache
 
 
-@api_router.post("/ai/generate")
-async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_user)):
+def _cleanup_ai_jobs():
+    now = time.monotonic()
+    expired = [jid for jid, job in _ai_jobs.items() if now - job["created_at"] > _AI_JOB_TTL_SECONDS]
+    for jid in expired:
+        _ai_jobs.pop(jid, None)
+
+
+async def _run_ai_job(job_id: str, messages: List[dict], model: str, temperature: float,
+                      max_tokens: int, thinking: bool, is_code: bool, user: User):
+    try:
+        content = await call_nvidia(
+            messages, model=model, temperature=temperature,
+            max_tokens=max_tokens, thinking=thinking,
+        )
+        used = await get_usage_today(user.user_id)
+        _ai_jobs[job_id] = {
+            **_ai_jobs[job_id],
+            "status": "done",
+            "content": content,
+            "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
+            "usage_used": used,
+            "usage_limit": daily_limit_for(user.plan),
+        }
+    except Exception as e:
+        logger.error(f"NVIDIA NIM error (job {job_id}): {e}")
+        _ai_jobs[job_id] = {
+            **_ai_jobs[job_id],
+            "status": "error",
+            "error": "Errore nella generazione con Zalvion AI",
+        }
+
+
+@api_router.post("/ai/generate/start")
+async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_current_user)):
     """
-    Risposta NON in streaming verso NVIDIA (stream=False, come richiesto) - ma la
-    connessione HTTP verso il frontend resta tecnicamente aperta con byte di
-    keep-alive invisibili (singoli spazi) ogni 15s, per evitare che un proxy nel
-    mezzo (Render, gateway) chiuda la connessione per inattivita' durante attese
-    di 20-25 minuti su Kimi K3 - la causa piu' probabile dei 504 visti finora.
-    Il frontend deve solo aspettare la fine e fare .trim() prima di JSON.parse().
+    Avvia la generazione in background e risponde SUBITO con un job_id (202-style,
+    anche se qui per semplicita' rispondiamo 200 con status:'pending'). Il client
+    deve poi chiamare GET /ai/generate/status/{job_id} in polling.
     """
+    _cleanup_ai_jobs()
     messages = build_messages(body)
 
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
@@ -1034,36 +1076,34 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
     model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
     temperature = 0.3 if is_code else 0.7
     max_tokens = NVIDIA_CODE_MAX_TOKENS if is_code else 4096
-    thinking = False
+    thinking = True if is_code else False
 
-    async def body_stream():
-        task = asyncio.create_task(call_nvidia(
-            messages, model=model, temperature=temperature,
-            max_tokens=max_tokens, thinking=thinking,
-        ))
-        try:
-            while not task.done():
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout=15.0)
-                except asyncio.TimeoutError:
-                    yield " "  # keep-alive invisibile - non e' output, solo per non far chiudere la connessione
-                    continue
-            content = task.result()
-        except Exception as e:
-            logger.error(f"NVIDIA NIM error: {e}")
-            yield "\n" + json.dumps({"error": "Errore nella generazione con Zalvion AI"})
-            return
+    job_id = uuid.uuid4().hex
+    _ai_jobs[job_id] = {
+        "status": "pending", "content": None, "error": None,
+        "created_at": time.monotonic(), "user_id": user.user_id,
+    }
+    asyncio.create_task(_run_ai_job(job_id, messages, model, temperature, max_tokens, thinking, is_code, user))
+    return {"job_id": job_id, "status": "pending"}
 
-        used = await get_usage_today(user.user_id)
-        payload = {
-            "content": content,
-            "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
-            "usage_used": used,
-            "usage_limit": daily_limit_for(user.plan),
-        }
-        yield "\n" + json.dumps(payload)
 
-    return StreamingResponse(body_stream(), media_type="application/json")
+@api_router.get("/ai/generate/status/{job_id}")
+async def ai_generate_status(job_id: str, user: User = Depends(get_current_user)):
+    job = _ai_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found (scaduto o mai esistito)")
+    if job["user_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    response = {"status": job["status"]}
+    if job["status"] == "done":
+        response.update({
+            "content": job["content"], "provider": job["provider"],
+            "usage_used": job["usage_used"], "usage_limit": job["usage_limit"],
+        })
+    elif job["status"] == "error":
+        response["error"] = job["error"]
+    return response
 
 
 
