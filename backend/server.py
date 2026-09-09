@@ -1087,6 +1087,29 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
             "status": "error",
             "error": "Errore nella generazione con Zalvion AI",
         }
+@api_router.get("/ai/list-nvidia-models")
+async def list_nvidia_models():
+    """
+    Interroga direttamente il catalogo NVIDIA NIM (endpoint standard OpenAI-
+    compatible /models) per sapere ESATTAMENTE quali model id sono validi in
+    questo momento con la tua chiave - il catalogo cambia troppo in fretta
+    per fidarsi di fonti esterne o di questo stesso codice scritto giorni fa.
+    """
+    client = _get_nvidia_client()
+    try:
+        response = await client.models.list()
+        model_ids = sorted(m.id for m in response.data)
+        code_candidates = [m for m in model_ids if any(
+            kw in m.lower() for kw in ("kimi", "deepseek", "glm", "qwen", "coder", "code")
+        )]
+        return {
+            "total_models": len(model_ids),
+            "code_related_candidates": code_candidates,
+            "all_models": model_ids,
+        }
+    except Exception as e:
+        logger.error(f"NVIDIA NIM: errore nel listare i modelli: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
 @api_router.post("/ai/generate/start")
 async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_current_user)):
