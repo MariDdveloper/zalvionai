@@ -60,7 +60,7 @@ NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', 'nvapi-PYhkpub0sCLVy7e5jLfSXu2
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
-NVIDIA_CODE_MODEL_FALLBACK = os.environ.get('NVIDIA_CODE_MODEL_FALLBACK', 'deepseek-ai/deepseek-v4-pro')
+NVIDIA_CODE_MODEL_FALLBACK = os.environ.get('NVIDIA_CODE_MODEL_FALLBACK', 'deepseek-ai/deepseek-v4-pro-0813')
 NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
 MAX_HISTORY_MESSAGES = 16
 
