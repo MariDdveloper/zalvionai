@@ -636,7 +636,7 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
     if model.startswith("openai/gpt-oss"):
         return {}
     body = {"chat_template_kwargs": {"thinking": thinking}}
-    if model == NVIDIA_CODE_MODEL and thinking:
+    if model in [NVIDIA_CODE_MODEL,  NVIDIA_CODE_MODEL_FALLBACK] and thinking:
         body["reasoning_effort"] = "max"
     return body
 
@@ -791,7 +791,7 @@ async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) 
     try:
         content = await call_nvidia(
             messages, model=NVIDIA_CODE_MODEL, temperature=0.3,
-            max_tokens=max_tokens, thinking=True,
+            max_tokens=max_tokens, thinking=False,
         )
         return content, NVIDIA_CODE_MODEL
     except Exception as primary_exc:
@@ -800,7 +800,7 @@ async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) 
             f"passo al fallback '{NVIDIA_CODE_MODEL_FALLBACK}': {primary_exc}"
         )
         content = await call_nvidia(
-            messages, model=NVIDIA_CODE_MODEL_FALLBACK, temperature=0.3,
+            messages, model=NVIDIA_CODE_MODEL_FALLBACK, temperature=0.1,
             max_tokens=max_tokens, thinking=True,
         )
         return content, NVIDIA_CODE_MODEL_FALLBACK
