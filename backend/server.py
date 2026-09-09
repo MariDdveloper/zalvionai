@@ -6,7 +6,6 @@ import random
 import hashlib
 import asyncio
 import logging
-import threading
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
@@ -24,7 +23,6 @@ from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
 from exa_py import AsyncExa
-
 
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_auth_requests
@@ -47,25 +45,9 @@ SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'noreply@getzalvion.com')
 resend.api_key = RESEND_API_KEY
 
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-EXA_API_KEY = os.environ.get('EXA_API_KEY')
+EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
-# =====================================================================================
-# AWS BEDROCK — PROVIDER TESTO (Amazon Nova Lite)
-# =====================================================================================
-# NVIDIA NIM resta invariato e viene usato SOLO per il codice (Kimi K3, vedi sopra).
-# Bedrock/Nova Lite gestisce ora tutte le richieste di testo non-codice: più veloce
-# di NVIDIA NIM su questo carico. Region di default us-east-1 (dove Nova Lite è
-# disponibile on-demand senza inference profile dedicato in molti account).
-# =====================================================================================
-# DEEPINFRA — PROVIDER TESTO (Llama 4 Scout 17B) — NVIDIA NIM resta invariato per il codice
-# =====================================================================================
-# =====================================================================================
-# SAMBANOVA CLOUD — PROVIDER TESTO (Llama 3.3 70B) — NVIDIA NIM resta invariato per il codice
-# =====================================================================================
-SAMBANOVA_API_KEY = os.environ.get('SAMBANOVA_API_KEY')
-SAMBANOVA_BASE_URL = "https://api.sambanova.ai/v1"
-SAMBANOVA_TEXT_MODEL = os.environ.get('SAMBANOVA_TEXT_MODEL', 'Meta-Llama-3.3-70B-Instruct')
-SAMBANOVA_TEXT_MAX_TOKENS = int(os.environ.get('SAMBANOVA_TEXT_MAX_TOKENS', '4096'))
+
 # =====================================================================================
 # NVIDIA NIM — UNICO PROVIDER AI DI ZALVION (testo + codice)
 # =====================================================================================
@@ -74,7 +56,7 @@ SAMBANOVA_TEXT_MAX_TOKENS = int(os.environ.get('SAMBANOVA_TEXT_MAX_TOKENS', '409
 # NB CRITICO: MAI mettere una chiave hardcoded come default qui - solo env var.
 # Se questa riga ha mai contenuto una chiave vera, quella chiave va revocata SUBITO
 # su build.nvidia.com/settings/api-keys, indipendentemente da questo fix.
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
@@ -637,29 +619,6 @@ def _get_nvidia_client() -> AsyncOpenAI:
             timeout=httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=30.0),
         )
     return _nvidia_client
-SAMBANOVA_RPS = float(os.environ.get('SAMBANOVA_RPS', '10.0'))
-sambanova_limiter = RateLimiter(rps=SAMBANOVA_RPS)
-sambanova_concurrency = asyncio.Semaphore(8)
-
-_sambanova_client: Optional[AsyncOpenAI] = None
-
-if not SAMBANOVA_API_KEY:
-    logger.error("⚠️  SAMBANOVA_API_KEY NON CONFIGURATA — le richieste di testo (Llama 3.3 70B) falliranno.")
-else:
-    _masked_sn = SAMBANOVA_API_KEY[:8] + "..." + SAMBANOVA_API_KEY[-4:] if len(SAMBANOVA_API_KEY) > 12 else "***"
-    logger.info(f"SAMBANOVA_API_KEY caricata correttamente ({_masked_sn})")
-
-
-def _get_sambanova_client() -> AsyncOpenAI:
-    global _sambanova_client
-    if _sambanova_client is None:
-        if not SAMBANOVA_API_KEY:
-            raise RuntimeError("SAMBANOVA_API_KEY non configurata")
-        _sambanova_client = AsyncOpenAI(
-            base_url=SAMBANOVA_BASE_URL, api_key=SAMBANOVA_API_KEY, max_retries=0,
-            timeout=httpx.Timeout(connect=15.0, read=60.0, write=30.0, pool=30.0),
-        )
-    return _sambanova_client
 
 
 def _timeout_for_model(model: str) -> httpx.Timeout:
@@ -681,7 +640,6 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
     return body
 
 
-
 def _to_openai_messages(messages: List[dict]) -> List[dict]:
     converted = []
     for m in messages:
@@ -699,103 +657,7 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
-async def call_sambanova_stream(messages: List[dict], model: str = None, temperature: float = 0.7,
-                                max_tokens: int = None):
-    """
-    Vera chiamata in streaming a SambaNova Cloud (Llama 3.3 70B) — stesso pattern
-    di call_nvidia_stream, stesso SDK (AsyncOpenAI), stesso convertitore messaggi
-    _to_openai_messages (SambaNova è OpenAI-compatible). Async generator: yield
-    di ogni pezzo di testo visibile appena arriva dal provider.
-    """
-    if not SAMBANOVA_API_KEY:
-        logger.error("SambaNova: richiesta bloccata PRIMA dell'invio - SAMBANOVA_API_KEY assente")
-        raise RuntimeError("SAMBANOVA_API_KEY non configurata")
 
-    model = model or SAMBANOVA_TEXT_MODEL
-    max_tokens = max_tokens or SAMBANOVA_TEXT_MAX_TOKENS
-    client = _get_sambanova_client()
-    openai_messages = _to_openai_messages(messages)
-
-    async with sambanova_concurrency:
-        await sambanova_limiter.wait()
-        started = time.monotonic()
-        content_chars = 0
-        first_token_at = None
-
-        logger.info(f"SambaNova: chiamata a '{model}' - max_tokens={max_tokens}, stream=True")
-        response = await client.chat.completions.create(
-            model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
-            max_tokens=max_tokens, stream=True,
-        )
-        logger.info(f"SambaNova: risposta HTTP ricevuta da '{model}' dopo {time.monotonic() - started:.1f}s, inizio lettura stream")
-
-        async for chunk in response:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                if first_token_at is None:
-                    first_token_at = time.monotonic() - started
-                    logger.info(f"SambaNova: primo token visibile da '{model}' dopo {first_token_at:.1f}s")
-                content_chars += len(delta.content)
-                yield delta.content
-
-        elapsed = time.monotonic() - started
-        logger.info(f"SambaNova: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili)")
-
-
-async def call_sambanova_text(messages: List[dict], model: str = None, temperature: float = 0.7,
-                              max_tokens: int = None, max_retries: int = 3) -> str:
-    """
-    Wrapper: consuma call_sambanova_stream e accumula tutto il testo, restituendolo
-    come blocco unico quando è completo — stesso ruolo di call_nvidia rispetto a
-    call_nvidia_stream. Chiamata da /ai/generate per tutto il testo non-codice.
-    """
-    model = model or SAMBANOVA_TEXT_MODEL
-    max_tokens = max_tokens or SAMBANOVA_TEXT_MAX_TOKENS
-    last_exc: Optional[Exception] = None
-
-    for attempt in range(max_retries):
-        logger.info(f"SambaNova: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, max_tokens={max_tokens})")
-        try:
-            chunks = []
-            async for piece in call_sambanova_stream(messages, model, temperature, max_tokens):
-                chunks.append(piece)
-            return "".join(chunks)
-        except openai.AuthenticationError as e:
-            logger.error(f"SambaNova: 401 - chiave sbagliata o revocata (model={model}): {e}")
-            raise RuntimeError(f"SambaNova API key non valida o revocata: {e}") from e
-        except openai.BadRequestError as e:
-            logger.error(f"SambaNova: 400 (model={model}): {e}")
-            raise RuntimeError(f"SambaNova API richiesta non valida: {e}") from e
-        except openai.RateLimitError as e:
-            last_exc = e
-            if attempt < max_retries - 1:
-                wait_s = min(2 ** attempt * 2, 20)
-                logger.warning(f"SambaNova 429 (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
-                await asyncio.sleep(wait_s)
-                continue
-            break
-        except (openai.APIConnectionError, openai.APITimeoutError) as e:
-            last_exc = e
-            if attempt < max_retries - 1:
-                logger.warning(f"SambaNova: connessione/timeout (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
-                await asyncio.sleep(2)
-                continue
-            break
-        except openai.InternalServerError as e:
-            last_exc = e
-            if attempt < max_retries - 1:
-                logger.warning(f"SambaNova: errore server 5xx (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
-                await asyncio.sleep(3)
-                continue
-            break
-        except openai.APIStatusError as e:
-            logger.error(f"SambaNova: errore {e.status_code} (model={model}): {e.message}")
-            last_exc = e
-            break
-
-    raise RuntimeError(f"SambaNova (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
                              max_tokens: int = 16384, thinking: bool = False):
@@ -1179,8 +1041,6 @@ async def ai_generate(body: ChatGenerateBody, user: User = Depends(get_current_u
             messages, model=model, temperature=temperature,
             max_tokens=max_tokens, thinking=thinking,
         ))
-            
-        
         try:
             while not task.done():
                 try:
