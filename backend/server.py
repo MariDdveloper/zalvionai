@@ -59,7 +59,8 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
-NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'z-ai/glm-5.2')
+NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
+NVIDIA_CODE_MODEL_FALLBACK = os.environ.get('NVIDIA_CODE_MODEL_FALLBACK', 'deepseek-ai/deepseek-v4-pro')
 NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
 MAX_HISTORY_MESSAGES = 16
 
@@ -777,6 +778,32 @@ async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7
             break
 
     raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) -> tuple:
+    """
+    Prova prima NVIDIA_CODE_MODEL (Kimi K3). Se fallisce del tutto (dopo tutti
+    i retry interni gia' gestiti da call_nvidia: 504, 429, timeout, ecc.),
+    ritenta l'intera richiesta su NVIDIA_CODE_MODEL_FALLBACK (DeepSeek V4 Pro)
+    come rete di sicurezza. Nessuna modifica a call_nvidia/call_nvidia_stream:
+    e' solo un wrapper che le richiama cosi' come sono, due volte se serve.
+    Restituisce (content, model_effettivamente_usato) cosi' il chiamante sa
+    quale dei due ha risposto.
+    """
+    try:
+        content = await call_nvidia(
+            messages, model=NVIDIA_CODE_MODEL, temperature=0.3,
+            max_tokens=max_tokens, thinking=True,
+        )
+        return content, NVIDIA_CODE_MODEL
+    except Exception as primary_exc:
+        logger.warning(
+            f"NVIDIA NIM: modello primario '{NVIDIA_CODE_MODEL}' fallito del tutto dopo tutti i retry, "
+            f"passo al fallback '{NVIDIA_CODE_MODEL_FALLBACK}': {primary_exc}"
+        )
+        content = await call_nvidia(
+            messages, model=NVIDIA_CODE_MODEL_FALLBACK, temperature=0.3,
+            max_tokens=max_tokens, thinking=True,
+        )
+        return content, NVIDIA_CODE_MODEL_FALLBACK
 
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
     """
@@ -1032,19 +1059,24 @@ def _cleanup_ai_jobs():
         _ai_jobs.pop(jid, None)
 
 
-async def _run_ai_job(job_id: str, messages: List[dict], model: str, temperature: float,
-                      max_tokens: int, thinking: bool, is_code: bool, user: User):
+async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: User):
     try:
-        content = await call_nvidia(
-            messages, model=model, temperature=temperature,
-            max_tokens=max_tokens, thinking=thinking,
-        )
+        if is_code:
+            content, used_model = await call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS)
+            provider_label = "kimi-k3" if used_model == NVIDIA_CODE_MODEL else "deepseek-v4-pro"
+        else:
+            content = await call_nvidia(
+                messages, model=NVIDIA_TEXT_MODEL, temperature=0.7,
+                max_tokens=4096, thinking=False,
+            )
+            provider_label = "deepseek-v4-flash"
+
         used = await get_usage_today(user.user_id)
         _ai_jobs[job_id] = {
             **_ai_jobs[job_id],
             "status": "done",
             "content": content,
-            "provider": "kimi-k3" if is_code else "deepseek-v4-flash",
+            "provider": provider_label,
             "usage_used": used,
             "usage_limit": daily_limit_for(user.plan),
         }
@@ -1056,13 +1088,13 @@ async def _run_ai_job(job_id: str, messages: List[dict], model: str, temperature
             "error": "Errore nella generazione con Zalvion AI",
         }
 
-
 @api_router.post("/ai/generate/start")
 async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_current_user)):
     """
-    Avvia la generazione in background e risponde SUBITO con un job_id (202-style,
-    anche se qui per semplicita' rispondiamo 200 con status:'pending'). Il client
-    deve poi chiamare GET /ai/generate/status/{job_id} in polling.
+    Avvia la generazione in background e risponde SUBITO con un job_id. Il
+    client chiama poi GET /ai/generate/status/{job_id} in polling. Per il
+    codice, la generazione vera e propria include gia' il fallback automatico
+    Kimi K3 -> DeepSeek V4 Pro (vedi call_nvidia_code_with_fallback).
     """
     _cleanup_ai_jobs()
     messages = build_messages(body)
@@ -1073,17 +1105,13 @@ async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_cur
         messages.insert(1, {"role": "system", "content": search_context})
 
     is_code = is_code_request(body)
-    model = NVIDIA_CODE_MODEL if is_code else NVIDIA_TEXT_MODEL
-    temperature = 0.3 if is_code else 0.7
-    max_tokens = NVIDIA_CODE_MAX_TOKENS if is_code else 4096
-    thinking = True if is_code else False
 
     job_id = uuid.uuid4().hex
     _ai_jobs[job_id] = {
         "status": "pending", "content": None, "error": None,
         "created_at": time.monotonic(), "user_id": user.user_id,
     }
-    asyncio.create_task(_run_ai_job(job_id, messages, model, temperature, max_tokens, thinking, is_code, user))
+    asyncio.create_task(_run_ai_job(job_id, messages, is_code, user))
     return {"job_id": job_id, "status": "pending"}
 
 
