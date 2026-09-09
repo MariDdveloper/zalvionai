@@ -56,9 +56,34 @@ export async function saveAssistantMessage(chatId, body) {
 }
 
 export async function generateAI(body) {
-  return apiPost(`/ai/generate`, body);
-}
+  const { job_id } = await apiPost(`/ai/generate/start`, body);
 
+  const POLL_INTERVAL_MS = 2000;
+  const MAX_WAIT_MS = 30 * 60 * 1000; // 30 minuti di margine, ben oltre i tempi visti finora con Kimi K3
+  const startedAt = Date.now();
+
+  while (true) {
+    if (Date.now() - startedAt > MAX_WAIT_MS) {
+      throw new Error("La generazione sta impiegando troppo tempo, riprova.");
+    }
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+
+    const status = await apiGet(`/ai/generate/status/${job_id}`);
+
+    if (status.status === "done") {
+      return {
+        content: status.content,
+        provider: status.provider,
+        usage_used: status.usage_used,
+        usage_limit: status.usage_limit,
+      };
+    }
+    if (status.status === "error") {
+      throw new Error(status.error || "Errore nella generazione con Zalvion AI");
+    }
+    // status === "pending" → continua il loop
+  }
+}
 export function streamRegenerate(chatId, payload, handlers) {
   return streamSSE(`${API}/chats/${chatId}/regenerate`, payload, handlers);
 }
