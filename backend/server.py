@@ -59,7 +59,7 @@ exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
-NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
+NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'z-ai/glm-5.2')
 NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
 MAX_HISTORY_MESSAGES = 16
 
