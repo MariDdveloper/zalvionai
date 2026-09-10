@@ -146,7 +146,7 @@ export default function ChatApp() {
       } catch (e) {
         setBusy(false);
         setStreamingId(null);
-        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: "Questo tipo di immagine non può essere generata." } : m));
+        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: "This type of image can't be generated." } : m));
       }
       return;
     }
@@ -165,7 +165,7 @@ export default function ChatApp() {
       loadChats(); checkAuth();
     } catch (e) {
       setBusy(false); setStreamingId(null);
-      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Errore di connessione con l'AI. Riprova." } : m));
+      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error with the AI. Please try again." } : m));
     }
   };
 
@@ -193,7 +193,7 @@ export default function ChatApp() {
       loadChats();
     } catch (e) {
       setBusy(false); setStreamingId(null);
-      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Errore di connessione." } : m));
+      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: m.content || "Connection error." } : m));
     }
   };
 
