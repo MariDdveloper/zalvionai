@@ -9,5 +9,5 @@ google-auth
 email-validator
 gTTS
 exa-py
-
+pypdf
 
