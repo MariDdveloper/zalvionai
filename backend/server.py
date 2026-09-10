@@ -45,10 +45,10 @@ SENDER_EMAIL = os.environ.get('SENDER_EMAIL', 'noreply@getzalvion.com')
 resend.api_key = RESEND_API_KEY
 
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
+EXA_API_KEY = os.environ.get('EXA_API_KEY')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 CLOUDFLARE_TEXT_ACCOUNT_ID = "53883d6ffd5f05104d800edf7d61f7cb"   # nuovo account, diverso da quello immagini
-CLOUDFLARE_TEXT_API_TOKEN = "cfut_qoGur3yWXN7mlkKtlYgLE5COBo1xdeWTZYNj5IXde1d3414a"
+CLOUDFLARE_TEXT_API_TOKEN = os.environ.get('CLOUDFLARE_API_KEY')
 CLOUDFLARE_TEXT_MODEL = "@cf/google/gemma-4-26b-a4b-it"  # verifica lo slug esatto nel dashboard
 CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
@@ -66,7 +66,7 @@ CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '4
 # NB CRITICO: MAI mettere una chiave hardcoded come default qui - solo env var.
 # Se questa riga ha mai contenuto una chiave vera, quella chiave va revocata SUBITO
 # su build.nvidia.com/settings/api-keys, indipendentemente da questo fix.
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY', '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')
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_TEXT_MODEL = os.environ.get('NVIDIA_TEXT_MODEL', 'deepseek-ai/deepseek-v4-flash-0731')
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'moonshotai/kimi-k3')
