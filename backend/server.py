@@ -1051,35 +1051,64 @@ async def logout(request: Request, response: Response):
 # =====================================================================================
 # GENERAZIONE AI
 # =====================================================================================
-def is_code_request(body: ChatGenerateBody) -> bool:
+async def is_code_request(body: ChatGenerateBody) -> bool:
+    """
+    Router asincrono: chiede a Gemma (via Cloudflare Workers AI, stessa
+    stream_cloudflare_text gia' usata dal ramo testo, nessuna modifica li')
+    se l'ultimo messaggio dell'utente sta chiedendo codice. Nessuna lista di
+    keyword/estensioni: comprensione vera del modello, funziona in qualsiasi
+    lingua senza parametri da mantenere.
+    Se la chiamata di classificazione fallisce, default = False (ramo testo)
+    per non caricare NVIDIA NIM - gia' soggetto a rate limit stretti - con
+    richieste che potrebbero non essere codice.
+    """
     if not body.messages:
         return False
-
-    def has_code_signal(text: str) -> bool:
-        text = (text or "").lower()
-        if "```" in text or "<claus-artifact" in text:
-            return True
-        return any(kw in text for kw in CODE_KEYWORDS)
 
     last_user_idx = next((i for i in range(len(body.messages) - 1, -1, -1)
                           if body.messages[i].role == "user"), None)
     if last_user_idx is None:
         return False
+
+    history = body.messages[max(0, last_user_idx - 2): last_user_idx + 1]
+    convo_lines = []
+    for m in history:
+        role_label = "Utente" if m.role == "user" else "Assistente"
+        convo_lines.append(f"{role_label}: {(m.content or '')[:500]}")
+    convo_text = "\n".join(convo_lines)
+
     last_user = body.messages[last_user_idx]
+    attachment_names = ", ".join(att.name for att in last_user.attachments if att.name)
+    if attachment_names:
+        convo_text += f"\n[File allegati nell'ultimo messaggio: {attachment_names}]"
 
-    if has_code_signal(last_user.content or ""):
-        return True
-    for att in last_user.attachments:
-        if att.kind == "file" and att.name.lower().endswith(CODE_EXTENSIONS):
-            return True
+    if not convo_text.strip():
+        return False
 
-    if last_user_idx > 0:
-        prev = body.messages[last_user_idx - 1]
-        if prev.role == "assistant" and has_code_signal(prev.content or ""):
-            return True
+    classify_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Rispondi SOLO con la parola true oppure la parola false, nient'altro. "
+                "L'ultimo messaggio dell'Utente in questa conversazione sta chiedendo di scrivere, "
+                "generare, correggere, spiegare riga per riga o modificare del codice sorgente / "
+                "uno script / un programma? Se e' una domanda generale, una richiesta creativa "
+                "(storie, testi, idee), una domanda di cultura generale o qualsiasi cosa che non "
+                "richieda di produrre codice, rispondi false."
+            ),
+        },
+        {"role": "user", "content": convo_text[:2000]},
+    ]
 
-    return False
-
+    try:
+        chunks = []
+        async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5):
+            chunks.append(piece)
+        answer = "".join(chunks).strip().lower()
+        return answer.startswith("true")
+    except Exception as e:
+        logger.warning(f"Classificazione is_code_request fallita, uso default False (ramo testo): {e}")
+        return False
 
 def build_messages(body: ChatGenerateBody) -> List[dict]:
     """
@@ -1196,7 +1225,7 @@ async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_cur
     if search_context:
         messages.insert(1, {"role": "system", "content": search_context})
 
-    is_code = is_code_request(body)
+    is_code = await is_code_request(body)
 
     job_id = uuid.uuid4().hex
     _ai_jobs[job_id] = {
