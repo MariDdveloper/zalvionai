@@ -877,6 +877,41 @@ async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) 
             max_tokens=max_tokens, thinking=True,
         )
         return content, NVIDIA_CODE_MODEL_FALLBACK
+async def is_unsafe_image_prompt(prompt: str) -> bool:
+    """
+    Filtro di sicurezza sui prompt di generazione immagini (Flux non ha un
+    filtro affidabile lato Cloudflare). Classificazione via Gemma, stesso
+    pattern di is_code_request - nessuna lista di parole.
+    Fail-safe: se la classificazione fallisce, il default è BLOCCARE - per un
+    filtro di sicurezza un falso negativo (contenuto vietato che passa) è
+    molto peggio di un falso positivo (richiesta innocua rifiutata per errore).
+    """
+    if not prompt or not prompt.strip():
+        return False
+    classify_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Rispondi SOLO con true o false, nient'altro. "
+                "Questo prompt per un generatore di immagini richiede contenuto "
+                "sessuale, nudità, pornografico, o comunque esplicito? Rispondi "
+                "true anche se la richiesta è ambigua, allusiva, o cerca di "
+                "aggirare il divieto con eufemismi, e anche se il soggetto "
+                "potrebbe essere un minore in qualsiasi contesto inappropriato. "
+                "Altrimenti rispondi false."
+            ),
+        },
+        {"role": "user", "content": prompt[:1000]},
+    ]
+    try:
+        chunks = []
+        async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5):
+            chunks.append(piece)
+        answer = "".join(chunks).strip().lower()
+        return not answer.startswith("false")
+    except Exception as e:
+        logger.warning(f"Moderazione immagine fallita, blocco per sicurezza: {e}")
+        return True
 
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
     """
@@ -1387,6 +1422,8 @@ async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_cu
     Genera un'immagine con Flux 1 [schnell] su Cloudflare Workers AI (gratuito, 720 req/min).
     NB: width/height del body sono ignorati da questo provider (risoluzione fissa del modello).
     """
+    if await is_unsafe_image_prompt(body.prompt):
+        raise HTTPException(status_code=400, detail="Questo tipo di immagine non può essere generata.")
     await enforce_and_increment(user)
     try:
         content, content_type = await call_cloudflare_flux_image(body.prompt)
@@ -1401,7 +1438,6 @@ async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_cu
         "usage_used": used,
         "usage_limit": daily_limit_for(user.plan),
     }
-
 
 @api_router.post("/tts")
 async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
