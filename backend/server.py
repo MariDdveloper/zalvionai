@@ -907,7 +907,9 @@ async def is_unsafe_image_prompt(prompt: str) -> bool:
         chunks = []
         async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5):
             chunks.append(piece)
+            
         answer = "".join(chunks).strip().lower()
+        logger.info(f"Moderazione immagine — prompt: '{prompt[:80]}' → risposta classificatore: '{answer}'")
         return not answer.startswith("false")
     except Exception as e:
         logger.warning(f"Moderazione immagine fallita, blocco per sicurezza: {e}")
