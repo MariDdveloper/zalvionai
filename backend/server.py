@@ -24,6 +24,7 @@ from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
 from exa_py import AsyncExa
 import pypdf
+from urllib.parse import quote
 
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_auth_requests
@@ -428,6 +429,8 @@ class FolderBody(BaseModel):
 class ActivateBody(BaseModel):
     subscription_id: str
     plan_type: str = "monthly"
+class PollinationsImageBody(BaseModel):
+    prompt: str
 
 
 # =====================================================================================
@@ -1440,6 +1443,28 @@ async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_cu
         "usage_used": used,
         "usage_limit": daily_limit_for(user.plan),
     }
+@api_router.post("/ai/generate-image-pollinations")
+async def ai_generate_image_pollinations(body: PollinationsImageBody, user: User = Depends(get_current_user)):
+    """
+    Costruisce l'URL immagine di Pollinations AI (gratuito, nessun limite di
+    piano) SOLO dopo il controllo di sicurezza lato backend - il frontend non
+    costruisce più l'URL da solo, quindi non può bypassare il filtro.
+    Stessi parametri di lib/pollinations.js (width/height 1024, model=flux,
+    nologo, referrer), seed casuale generato qui invece che nel browser.
+    Non richiama enforce_and_increment: il conteggio giornaliero è già
+    gestito da /chats/{chat_id}/messages/user, chiamato dal frontend prima
+    di questo endpoint (stesso comportamento di prima, invariato).
+    """
+    if await is_unsafe_image_prompt(body.prompt):
+        raise HTTPException(status_code=400, detail="Questo tipo di immagine non può essere generata.")
+    prompt_text = (body.prompt or "").strip() or "a beautiful high quality image"
+    encoded = quote(prompt_text, safe="")
+    seed = random.randint(0, 999999999)
+    image_url = (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?width=1024&height=1024&seed={seed}&model=flux&nologo=true&referrer=zalvionai.com"
+    )
+    return {"image_url": image_url}
 
 @api_router.post("/tts")
 async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
