@@ -54,6 +54,8 @@ CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
 )
+CLOUDFLARE_TEXT_TEMPERATURE = float(os.environ.get('CLOUDFLARE_TEXT_TEMPERATURE', '0.7'))
+CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '4096'))
 
 
 # =====================================================================================
@@ -683,6 +685,7 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
         "max_tokens": max_tokens,
     }
 
+
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
         async with client.stream("POST", CLOUDFLARE_TEXT_URL, headers=headers, json=payload) as response:
             if response.status_code != 200:
@@ -708,7 +711,18 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
                 chunk = data.get("response", "")
                 if chunk:
                     yield chunk
-
+async def call_cloudflare_text(messages: List[dict], temperature: float = CLOUDFLARE_TEXT_TEMPERATURE,
+                                max_tokens: int = CLOUDFLARE_TEXT_MAX_TOKENS) -> str:
+    """
+    Wrapper non-streaming: consuma stream_cloudflare_text e accumula tutto il
+    testo in un'unica stringa (stesso pattern di call_nvidia rispetto a
+    call_nvidia_stream), cosi' si integra nel job store esistente.
+    """
+    openai_messages = _to_openai_messages(messages)
+    chunks = []
+    async for piece in stream_cloudflare_text(openai_messages, temperature=temperature, max_tokens=max_tokens):
+        chunks.append(piece)
+    return "".join(chunks)
 
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
                              max_tokens: int = 16384, thinking: bool = False):
@@ -1115,12 +1129,8 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
             content, used_model = await call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS)
             provider_label = "kimi-k3" if used_model == NVIDIA_CODE_MODEL else "deepseek-v4-pro"
         else:
-           # --- NUOVO: ramo Cloudflare ---
-            full_text = ""
-            async for chunk in stream_cloudflare_text(messages, **kwargs):
-                full_text += chunk
-            result = full_text
-            provider_name = "cloudflare_workers_ai"
+            content = await call_cloudflare_text(messages)
+            provider_label = "cloudflare_workers_ai"
 
         used = await get_usage_today(user.user_id)
         _ai_jobs[job_id] = {
@@ -1206,16 +1216,6 @@ async def ai_generate_status(job_id: str, user: User = Depends(get_current_user)
     elif job["status"] == "error":
         response["error"] = job["error"]
     return response
-router = APIRouter()
-@router.post("/ai/cloudflare/generate")
-async def generate_cloudflare_text(request: dict):
-    """
-    Endpoint dedicato Cloudflare Workers AI — streaming diretto, nessun job/polling
-    (Workers AI è edge/veloce, non soffre dei timeout lunghi che avevano NVIDIA NIM).
-    """
-    messages = request.get("messages", [])
-    temperature = request.get("temperature", 0.7)
-    max_tokens = request.get("max_tokens", 4096)
 
     async def event_generator():
         try:
@@ -1229,22 +1229,6 @@ async def generate_cloudflare_text(request: dict):
 # --- Router: decide quale provider usare PRIMA di generare ---
 # Riusa la tua is_code_request(text) già esistente per CODE_KEYWORDS,
 # non la ridefinisco qui.
-
-async def route_ai_request(prompt: str, messages: list[dict], **kwargs):
-    """
-    Bivio unico:
-    - richiesta di codice -> NVIDIA NIM (Kimi K3 + fallback DeepSeek V4 Pro, INVARIATO)
-    - richiesta normale/testo -> Cloudflare Workers AI (veloce, streaming diretto)
-    """
-    if is_code_request(prompt):
-        # Ramo NVIDIA: chiama esattamente la funzione che hai già,
-        # con tutta la logica di complessità/fallback/retry intatta.
-        return await run_nvidia_code_job(prompt, messages, **kwargs)  # <-- la tua funzione esistente, non toccata
-
-    # Ramo Cloudflare: testo normale, niente job/polling, risposta rapida
-    return await run_cloudflare_text_job(messages, **kwargs)
-
-
 
 
 @api_router.get("/ai/test-nvidia")
