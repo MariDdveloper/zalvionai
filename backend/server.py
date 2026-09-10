@@ -1115,11 +1115,12 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
             content, used_model = await call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS)
             provider_label = "kimi-k3" if used_model == NVIDIA_CODE_MODEL else "deepseek-v4-pro"
         else:
-            content = await call_nvidia(
-                messages, model=NVIDIA_TEXT_MODEL, temperature=0.7,
-                max_tokens=4096, thinking=False,
-            )
-            provider_label = "deepseek-v4-flash"
+           # --- NUOVO: ramo Cloudflare ---
+            full_text = ""
+            async for chunk in stream_cloudflare_text(messages, **kwargs):
+                full_text += chunk
+            result = full_text
+            provider_name = "cloudflare_workers_ai"
 
         used = await get_usage_today(user.user_id)
         _ai_jobs[job_id] = {
@@ -1225,6 +1226,23 @@ async def generate_cloudflare_text(request: dict):
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+# --- Router: decide quale provider usare PRIMA di generare ---
+# Riusa la tua is_code_request(text) già esistente per CODE_KEYWORDS,
+# non la ridefinisco qui.
+
+async def route_ai_request(prompt: str, messages: list[dict], **kwargs):
+    """
+    Bivio unico:
+    - richiesta di codice -> NVIDIA NIM (Kimi K3 + fallback DeepSeek V4 Pro, INVARIATO)
+    - richiesta normale/testo -> Cloudflare Workers AI (veloce, streaming diretto)
+    """
+    if is_code_request(prompt):
+        # Ramo NVIDIA: chiama esattamente la funzione che hai già,
+        # con tutta la logica di complessità/fallback/retry intatta.
+        return await run_nvidia_code_job(prompt, messages, **kwargs)  # <-- la tua funzione esistente, non toccata
+
+    # Ramo Cloudflare: testo normale, niente job/polling, risposta rapida
+    return await run_cloudflare_text_job(messages, **kwargs)
 
 
 
