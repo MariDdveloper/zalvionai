@@ -131,15 +131,25 @@ export default function ChatApp() {
     if (saved?.title) setChats((p) => p.map((c) => c.chat_id === activeChatId ? { ...c, title: saved.title } : c));
 
     // 2) Generate directly from the browser (Pollinations)
+    // 2) Generate image via backend (moderation check + Pollinations URL)
+   
     if (isImage) {
-      const url = pollinationsImageUrl(payload.content || "");
-      setMessages((p) => p.map((m) => m.id === asstId ? { ...m, type: "image", image_url: url, content: "" } : m));
-      setBusy(false); setStreamingId(null);
-      await saveAssistantMessage(activeChatId, { type: "image", image_url: url, content: "" }).catch(() => {});
-      loadChats(); checkAuth();
+      try {
+        const res = await apiPost("/ai/generate-image-pollinations", { prompt: payload.content || "" });
+        const url = res.image_url;
+        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, type: "image", image_url: url, content: "" } : m));
+        setBusy(false);
+        setStreamingId(null);
+        await saveAssistantMessage(activeChatId, { type: "image", image_url: url, content: "" }).catch(() => {});
+        loadChats();
+        checkAuth();
+      } catch (e) {
+        setBusy(false);
+        setStreamingId(null);
+        setMessages((p) => p.map((m) => m.id === asstId ? { ...m, content: "Questo tipo di immagine non può essere generata." } : m));
+      }
       return;
     }
-
     const convo = [
       ...historySnapshot.map((m) => ({ role: m.role, content: m.content || (m.type === "image" ? "[immagine generata]" : "") })),
       { role: "user", content: payload.content || "", attachments: payload.attachments || [] },
