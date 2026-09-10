@@ -23,6 +23,7 @@ from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, EmailStr, Field
 from exa_py import AsyncExa
+import pypdf
 
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_auth_requests
@@ -284,7 +285,7 @@ Rules:
 
 ## ATTACHMENTS
 - Code/text file attachments arrive inline as labeled fenced blocks — treat them as ground truth for that file's current content; when asked to modify one, base changes on exactly what was provided.
-- If a message mentions an image or PDF attachment note, that feature is temporarily unavailable — say so plainly and offer to help via text/code instead, without pretending to have seen it.
+
 
 ## SAFETY BOUNDARIES
 - Do not write malware, exploits, credential-stealing scripts, or anything designed to cause harm or break the law — decline briefly and, if a legitimate alternative exists, suggest it.
@@ -913,7 +914,79 @@ async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_ret
             last_exc = e
             break
     raise RuntimeError(f"Cloudflare Workers AI (Flux, immagini) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+async def extract_pdf_text(b64_pdf: str, max_chars: int = 15000) -> str:
+    """
+    Estrae il testo da un PDF in locale - nessuna chiamata AI, nessun costo,
+    nessun tocco a NVIDIA/Cloudflare. Se il PDF è scansionato (senza testo
+    selezionabile) il risultato può essere vuoto: limite noto, si può
+    aggiungere OCR in futuro se serve.
+    """
+    def _extract():
+        pdf_bytes = base64.b64decode(b64_pdf)
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        text_parts = [page.extract_text() or "" for page in reader.pages]
+        return "\n\n".join(text_parts)[:max_chars]
+    return await asyncio.to_thread(_extract)
 
+
+async def describe_image_with_vision(b64_image: str, timeout: float = 45.0) -> str:
+    """
+    Descrive un'immagine con Llama 3.2 11B Vision su Cloudflare Workers AI
+    (stesso account/token già usato per Flux - immagini). Funzione nuova e
+    isolata: non tocca call_nvidia*, stream_cloudflare_text né call_cloudflare_flux_image.
+    NB: al primo utilizzo va accettata UNA VOLTA la licenza Meta con:
+    curl https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/ai/run/@cf/meta/llama-3.2-11b-vision-instruct \
+      -H "Authorization: Bearer $TOKEN" -d '{"prompt": "agree"}'
+    (va fatta a mano una volta sola, non nel codice dell'app).
+    """
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN non configurate")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_VISION_MODEL}"
+    headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "messages": [
+            {"role": "system", "content": "You are an assistant that describes images accurately and in detail, including any visible text."},
+            {"role": "user", "content": "Describe this image in detail."},
+        ],
+        "image": f"data:image/jpeg;base64,{b64_image}",
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(url, json=payload, headers=headers)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Cloudflare Vision {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    result = data.get("result", {})
+    if isinstance(result, dict):
+        return result.get("response") or result.get("description") or ""
+    return str(result)
+
+
+async def enrich_attachments_with_ai_analysis(body: ChatGenerateBody) -> None:
+    """
+    Prima di build_messages: se l'ultimo messaggio utente ha allegati immagine/pdf,
+    li trasforma in allegati kind="file" con testo già pronto (vision model per
+    le immagini, estrazione locale per i pdf). Da li in poi build_messages li
+    tratta come un file di testo qualsiasi - quel ramo esiste già, non viene
+    toccato. Muta body in place. Se un'analisi fallisce, l'allegato resta
+    com'era (degrado controllato verso il vecchio messaggio "non disponibile").
+    """
+    last_user = next((m for m in reversed(body.messages) if m.role == "user"), None)
+    if not last_user or not last_user.attachments:
+        return
+    for att in last_user.attachments:
+        try:
+            if att.kind == "image" and att.b64:
+                description = await describe_image_with_vision(att.b64)
+                if description:
+                    att.kind = "file"
+                    att.text = f'[Descrizione automatica dell\'immagine "{att.name}"]\n{description}'
+            elif att.kind == "pdf" and att.b64:
+                extracted = await extract_pdf_text(att.b64)
+                if extracted.strip():
+                    att.kind = "file"
+                    att.text = f'[Testo estratto dal PDF "{att.name}"]\n{extracted}'
+        except Exception as e:
+            logger.warning(f"Analisi allegato '{att.name}' fallita, resta non disponibile: {e}")
 
 async def exa_web_search(query: str, num_results: int = 5) -> str:
     if not exa_client or not query.strip():
@@ -1218,6 +1291,7 @@ async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_cur
     Kimi K3 -> DeepSeek V4 Pro (vedi call_nvidia_code_with_fallback).
     """
     _cleanup_ai_jobs()
+    await enrich_attachments_with_ai_analysis(body)
     messages = build_messages(body)
 
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
