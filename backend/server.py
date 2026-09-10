@@ -47,6 +47,14 @@ resend.api_key = RESEND_API_KEY
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
+CLOUDFLARE_TEXT_ACCOUNT_ID = "53883d6ffd5f05104d800edf7d61f7cb"   # nuovo account, diverso da quello immagini
+CLOUDFLARE_TEXT_API_TOKEN = "cfut_po1Ivi25gGTPSUNy4aNdySoaNwGOn44OVShj6gAo276c69a7"
+CLOUDFLARE_TEXT_MODEL = "@cf/deepseek-ai/deepseek-v4-flash-0731"  # verifica lo slug esatto nel dashboard
+CLOUDFLARE_TEXT_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/"
+    f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
+)
+
 
 # =====================================================================================
 # NVIDIA NIM — UNICO PROVIDER AI DI ZALVION (testo + codice)
@@ -658,6 +666,48 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
+async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096):
+    """
+    Streamma la risposta testuale da Cloudflare Workers AI (SSE).
+    `messages` nel formato OpenAI-style: [{"role": "user", "content": "..."}]
+    Yielda chunk di testo man mano che arrivano.
+    """
+    headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_TEXT_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messages": messages,
+        "stream": True,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
+        async with client.stream("POST", CLOUDFLARE_TEXT_URL, headers=headers, json=payload) as response:
+            if response.status_code != 200:
+                error_body = await response.aread()
+                raise RuntimeError(
+                    f"Cloudflare Workers AI error {response.status_code}: {error_body.decode(errors='ignore')}"
+                )
+
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+
+                data_str = line[len("data: "):].strip()
+                if data_str == "[DONE]":
+                    break
+
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                # Workers AI SSE restituisce {"response": "..."} per chunk
+                chunk = data.get("response", "")
+                if chunk:
+                    yield chunk
 
 
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
@@ -1155,6 +1205,26 @@ async def ai_generate_status(job_id: str, user: User = Depends(get_current_user)
     elif job["status"] == "error":
         response["error"] = job["error"]
     return response
+router = APIRouter()
+@router.post("/ai/cloudflare/generate")
+async def generate_cloudflare_text(request: dict):
+    """
+    Endpoint dedicato Cloudflare Workers AI — streaming diretto, nessun job/polling
+    (Workers AI è edge/veloce, non soffre dei timeout lunghi che avevano NVIDIA NIM).
+    """
+    messages = request.get("messages", [])
+    temperature = request.get("temperature", 0.7)
+    max_tokens = request.get("max_tokens", 4096)
+
+    async def event_generator():
+        try:
+            async for chunk in stream_cloudflare_text(messages, temperature, max_tokens):
+                yield f"data: {json.dumps({'content': chunk})}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 
