@@ -48,8 +48,8 @@ GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 EXA_API_KEY = os.environ.get('EXA_API_KEY', '6b27eaf6-bd1a-472c-974f-5fc66815792a')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 CLOUDFLARE_TEXT_ACCOUNT_ID = "53883d6ffd5f05104d800edf7d61f7cb"   # nuovo account, diverso da quello immagini
-CLOUDFLARE_TEXT_API_TOKEN = "cfut_po1Ivi25gGTPSUNy4aNdySoaNwGOn44OVShj6gAo276c69a7"
-CLOUDFLARE_TEXT_MODEL = "@cf/deepseek-ai/deepseek-v4-flash-0731"  # verifica lo slug esatto nel dashboard
+CLOUDFLARE_TEXT_API_TOKEN = "cfut_qoGur3yWXN7mlkKtlYgLE5COBo1xdeWTZYNj5IXde1d3414a"
+CLOUDFLARE_TEXT_MODEL = "@cf/google/gemma-4-26b-a4b-it"  # verifica lo slug esatto nel dashboard
 CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
@@ -673,6 +673,10 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
     Streamma la risposta testuale da Cloudflare Workers AI (SSE).
     `messages` nel formato OpenAI-style: [{"role": "user", "content": "..."}]
     Yielda chunk di testo man mano che arrivano.
+
+    enable_thinking=False: disattiva il thinking mode di Gemma 4 (attivo di
+    default) - senza risposte normali "spendono" comunque decine/centinaia
+    di token in reasoning_content prima del content vero, rallentando tutto.
     """
     headers = {
         "Authorization": f"Bearer {CLOUDFLARE_TEXT_API_TOKEN}",
@@ -683,8 +687,8 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
         "stream": True,
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
-
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
         async with client.stream("POST", CLOUDFLARE_TEXT_URL, headers=headers, json=payload) as response:
@@ -707,8 +711,12 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
                 except json.JSONDecodeError:
                     continue
 
-                # Workers AI SSE restituisce {"response": "..."} per chunk
-                chunk = data.get("response", "")
+                # Con enable_thinking=False non dovrebbe piu' comparire
+                # "reasoning_content" nei delta, ma per sicurezza lo scartiamo
+                # comunque se presente, cosi' non finisce mai nel testo mostrato.
+                choices = data.get("choices") or [{}]
+                delta = choices[0].get("delta", {}) if choices else {}
+                chunk = delta.get("content") or data.get("response", "")
                 if chunk:
                     yield chunk
 async def call_cloudflare_text(messages: List[dict], temperature: float = CLOUDFLARE_TEXT_TEMPERATURE,
