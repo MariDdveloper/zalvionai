@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
-from gtts import gTTS
+import edge_tts
 import io
 import httpx
 import resend
@@ -405,8 +405,23 @@ class TTSBody(BaseModel):
     text: str
     lang: str = "it"
 
-
-GTTS_LANG_MAP = {**{code: code for code in LANG_NAMES.keys()}, "zh": "zh-CN"}
+EDGE_TTS_VOICE_MAP = {
+    "en": "en-US-AriaNeural",
+    "it": "it-IT-ElsaNeural",
+    "es": "es-ES-ElviraNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "de": "de-DE-KatjaNeural",
+    "pt": "pt-PT-RaquelNeural",
+    "nl": "nl-NL-ColetteNeural",
+    "ru": "ru-RU-SvetlanaNeural",
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "ko": "ko-KR-SunHiNeural",
+    "ar": "ar-SA-ZariyahNeural",
+    "hi": "hi-IN-SwaraNeural",
+    "tr": "tr-TR-EmelNeural",
+    "pl": "pl-PL-ZofiaNeural",
+}
 
 
 class AssistantMsgBody(BaseModel):
@@ -1473,7 +1488,6 @@ async def ai_generate_image_pollinations(body: PollinationsImageBody, user: User
         f"?width=1024&height=1024&seed={seed}&model=flux&nologo=true&referrer=zalvionai.com"
     )
     return {"image_url": image_url}
-
 @api_router.post("/tts")
 async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
     text = (body.text or "").strip()
@@ -1481,13 +1495,16 @@ async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="The text cannot be empty.")
     if len(text) > 3000:
         raise HTTPException(status_code=400, detail="Text too long, (max 3000)")
-    gtts_lang = GTTS_LANG_MAP.get(body.lang, "en")
+    voice = EDGE_TTS_VOICE_MAP.get(body.lang, "en-US-AriaNeural")
     try:
         buf = io.BytesIO()
-        await asyncio.to_thread(lambda: gTTS(text=text, lang=gtts_lang).write_to_fp(buf))
+        communicate = edge_tts.Communicate(text, voice)
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                buf.write(chunk["data"])
         b64 = base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
-        logger.error(f"gTTS error: {e}")
+        logger.error(f"edge-tts error: {e}")
         raise HTTPException(status_code=502, detail="Error in the audio generation, try again")
     return {"audio_url": f"data:audio/mpeg;base64,{b64}"}
 
