@@ -405,25 +405,7 @@ class TTSBody(BaseModel):
     text: str
     lang: str = "it"
 
-EDGE_TTS_VOICE_MAP = {
-    "en": "en-US-AriaNeural",
-    "it": "it-IT-ElsaNeural",
-    "es": "es-ES-ElviraNeural",
-    "fr": "fr-FR-DeniseNeural",
-    "de": "de-DE-KatjaNeural",
-    "pt": "pt-PT-RaquelNeural",
-    "nl": "nl-NL-ColetteNeural",
-    "ru": "ru-RU-SvetlanaNeural",
-    "zh": "zh-CN-XiaoxiaoNeural",
-    "ja": "ja-JP-NanamiNeural",
-    "ko": "ko-KR-SunHiNeural",
-    "ar": "ar-SA-ZariyahNeural",
-    "hi": "hi-IN-SwaraNeural",
-    "tr": "tr-TR-EmelNeural",
-    "pl": "pl-PL-ZofiaNeural",
-}
-
-
+EDGE_TTS_VOICE = os.environ.get('EDGE_TTS_VOICE', 'en-US-AndrewMultilingualNeural')
 class AssistantMsgBody(BaseModel):
     content: str = ""
     type: str = "text"
@@ -1495,10 +1477,9 @@ async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="The text cannot be empty.")
     if len(text) > 3000:
         raise HTTPException(status_code=400, detail="Text too long, (max 3000)")
-    voice = EDGE_TTS_VOICE_MAP.get(body.lang, "en-US-AriaNeural")
     try:
         buf = io.BytesIO()
-        communicate = edge_tts.Communicate(text, voice)
+        communicate = edge_tts.Communicate(text, EDGE_TTS_VOICE)
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 buf.write(chunk["data"])
