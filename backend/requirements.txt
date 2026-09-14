@@ -10,4 +10,5 @@ email-validator
 gTTS
 exa-py
 pypdf
+edge-tts
 
