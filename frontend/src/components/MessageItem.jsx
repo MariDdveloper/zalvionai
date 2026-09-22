@@ -5,8 +5,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Copy, Check, FileText, Image as ImageIcon, RefreshCw, Code2, Loader2, ArrowRight, Volume2 } from "lucide-react";
 import { parseMessage, TOKEN_SPLIT_RE } from "../lib/artifacts";
-import { apiPost } from "../lib/api";
-import { toast } from "sonner";
+
 
 function ArtifactCard({ artifact, onOpen }) {
   return (
@@ -33,23 +32,6 @@ function BuildingCard() {
 
 function CodeBlock({ inline, className, children }) {
   const [copied, setCopied] = useState(false);
-  const [ttsBusy, setTtsBusy] = useState(false);
-  const [audioUrl, setAudioUrl] = useState("");
-
-  const playTTS = async () => {
-    if (ttsBusy) return;
-    if (audioUrl) { new Audio(audioUrl).play(); return; }
-    setTtsBusy(true);
-    try {
-      const res = await apiPost("/tts", { text: message.content });
-      setAudioUrl(res.audio_url);
-      new Audio(res.audio_url).play();
-    } catch (e) {
-      toast.error(e.message || "Error generating audio");
-    } finally {
-      setTtsBusy(false);
-    }
-  };
   const match = /language-(\w+)/.exec(className || "");
   const code = String(children).replace(/\n$/, "");
   if (inline || !match) return <code className={className}>{children}</code>;
@@ -135,11 +117,6 @@ function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, onOpen
             <button data-testid="copy-message-button" onClick={() => { navigator.clipboard.writeText(message.content); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
               className="flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]">
               {copied ? <Check size={13} /> : <Copy size={13} />}{copied ? (t?.copied || "Copied") : (t?.copy || "Copy")}
-            </button>
-            <button data-testid="tts-message-button" onClick={playTTS} disabled={ttsBusy}
-              className="flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--primary)] disabled:opacity-50">
-              {ttsBusy ? <Loader2 size={13} className="animate-spin" /> : <Volume2 size={13} />}
-              {ttsBusy ? (t?.ttsGenerating || "Generating...") : (t?.listen || "Listen")}
             </button>
             {canRegenerate && (
               <button data-testid="regenerate-button" onClick={onRegenerate}
