@@ -725,6 +725,7 @@ NVIDIA_CODE_MODELS = [m.strip() for m in os.environ.get(
     'NVIDIA_CODE_MODELS',
     'moonshotai/kimi-k2.6,nvidia/nemotron-3-ultra-550b-a55b,z-ai/glm-5.3'
 ).split(',') if m.strip()]
+NVIDIA_STREAM_IDLE_TIMEOUT = float(os.environ.get('NVIDIA_STREAM_IDLE_TIMEOUT', '600'))
 NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
 nvidia_code_semaphore = asyncio.Semaphore(2)
 
@@ -756,9 +757,10 @@ def _nvidia_code_body(model: str, messages: List[dict], max_tokens: int, reasoni
 
 async def _nvidia_stream_once(body: dict) -> str:
     headers = {"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"}
-    timeout = httpx.Timeout(connect=30.0, read=None, write=60.0, pool=60.0)
+    timeout = httpx.Timeout(connect=30.0, read=NVIDIA_STREAM_IDLE_TIMEOUT, write=60.0, pool=60.0)
     chunks = []
     started = time.monotonic()
+    got_first_chunk = False
     reasoning_chars = 0
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", NVIDIA_CHAT_URL, headers=headers, json=body) as response:
@@ -771,6 +773,9 @@ async def _nvidia_stream_once(body: dict) -> str:
                 data_str = line[6:].strip()
                 if data_str == "[DONE]":
                     break
+                if not got_first_chunk:
+                    got_first_chunk = True
+                    logger.info(f"NVIDIA NIM '{body['model']}': primo chunk dopo {time.monotonic() - started:.1f}s: {data_str[:300]}")
                 try:
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
@@ -819,6 +824,10 @@ async def call_nvidia_code(messages: List[dict], max_tokens: int = NVIDIA_CODE_M
                     if e.status in (429, 500, 502, 503, 504):
                         await asyncio.sleep(3 * (attempt + 1))
                         continue
+                    break
+                except httpx.ReadTimeout:
+                    last_exc = RuntimeError(f"nessun dato per {NVIDIA_STREAM_IDLE_TIMEOUT:.0f}s")
+                    logger.warning(f"NVIDIA NIM '{model}': stream fermo da {NVIDIA_STREAM_IDLE_TIMEOUT:.0f}s senza dati, passo al modello successivo")
                     break
                
                 except (httpx.HTTPError, asyncio.TimeoutError) as e:
