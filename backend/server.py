@@ -758,6 +758,8 @@ async def _nvidia_stream_once(body: dict) -> str:
     headers = {"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"}
     timeout = httpx.Timeout(connect=30.0, read=None, write=60.0, pool=60.0)
     chunks = []
+    started = time.monotonic()
+    reasoning_chars = 0
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with client.stream("POST", NVIDIA_CHAT_URL, headers=headers, json=body) as response:
             if response.status_code != 200:
@@ -775,8 +777,12 @@ async def _nvidia_stream_once(body: dict) -> str:
                     continue
                 choices = data.get("choices") or []
                 delta = choices[0].get("delta", {}) if choices else {}
+                reasoning_piece = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                reasoning_chars += len(reasoning_piece)
                 piece = delta.get("content")
                 if piece:
+                    if not chunks:
+                        logger.info(f"NVIDIA NIM '{body['model']}': primo token dopo {time.monotonic() - started:.1f}s (reasoning: {reasoning_chars} caratteri)")
                     chunks.append(piece)
     return "".join(chunks)
 
@@ -792,8 +798,11 @@ async def call_nvidia_code(messages: List[dict], max_tokens: int = NVIDIA_CODE_M
             reasoning = True
             for attempt in range(3):
                 try:
-                    content = await _nvidia_stream_once(
-                        _nvidia_code_body(model, openai_messages, max_tokens, reasoning))
+                    logger.info(f"NVIDIA NIM: invio a '{model}' (tentativo {attempt + 1}/3, reasoning={reasoning})")
+                    content = await asyncio.wait_for(
+                        _nvidia_stream_once(_nvidia_code_body(model, openai_messages, max_tokens, reasoning)),
+                    )
+                        
                     if content.strip():
                         logger.info(f"NVIDIA NIM: risposta da '{model}' ({len(content)} caratteri)")
                         return content, model
@@ -812,6 +821,7 @@ async def call_nvidia_code(messages: List[dict], max_tokens: int = NVIDIA_CODE_M
                         await asyncio.sleep(3 * (attempt + 1))
                         continue
                     break
+               
                 except (httpx.HTTPError, asyncio.TimeoutError) as e:
                     last_exc = e
                     logger.warning(f"NVIDIA NIM '{model}' tentativo {attempt + 1}/3 errore di rete: {e}")
