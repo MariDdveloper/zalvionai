@@ -799,9 +799,8 @@ async def call_nvidia_code(messages: List[dict], max_tokens: int = NVIDIA_CODE_M
             for attempt in range(3):
                 try:
                     logger.info(f"NVIDIA NIM: invio a '{model}' (tentativo {attempt + 1}/3, reasoning={reasoning})")
-                    content = await asyncio.wait_for(
-                        _nvidia_stream_once(_nvidia_code_body(model, openai_messages, max_tokens, reasoning)),
-                    )
+                    content = await _nvidia_stream_once(
+                        _nvidia_code_body(model, openai_messages, max_tokens, reasoning))
                         
                     if content.strip():
                         logger.info(f"NVIDIA NIM: risposta da '{model}' ({len(content)} caratteri)")
