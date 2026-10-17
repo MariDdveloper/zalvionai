@@ -54,6 +54,12 @@ CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
 )
+CLOUDFLARE_CODE_MODEL = os.environ.get('CLOUDFLARE_CODE_MODEL', '@cf/zai-org/glm-5.2')
+CLOUDFLARE_CODE_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/"
+    f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_CODE_MODEL}"
+)
+CLOUDFLARE_CODE_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_CODE_MAX_TOKENS', '32768'))
 CLOUDFLARE_TEXT_TEMPERATURE = float(os.environ.get('CLOUDFLARE_TEXT_TEMPERATURE', '0.7'))
 CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '4096'))
 
