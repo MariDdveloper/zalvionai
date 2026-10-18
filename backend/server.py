@@ -1300,7 +1300,7 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
 # worker/processi bisognera' spostare questo store su Redis o Supabase.
 # =====================================================================================
 _ai_jobs: dict = {}
-_AI_JOB_TTL_SECONDS = 30 * 60  # 30 minuti, poi il job viene scartato dalla cache
+_AI_JOB_TTL_SECONDS = 3 * 60 * 60  # 3 ore  # 30 minuti, poi il job viene scartato dalla cache
 
 
 def _cleanup_ai_jobs():
