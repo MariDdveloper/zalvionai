@@ -59,7 +59,7 @@ export async function generateAI(body) {
   const { job_id } = await apiPost(`/ai/generate/start`, body);
 
   const POLL_INTERVAL_MS = 2000;
-  const MAX_WAIT_MS = 30 * 60 * 1000; // 30 minuti di margine, ben oltre i tempi visti finora con Kimi K3
+  const MAX_WAIT_MS = 3 * 60 * 60 * 1000; // 30 minuti di margine, ben oltre i tempi visti finora con Kimi K3
   const startedAt = Date.now();
 
   while (true) {
