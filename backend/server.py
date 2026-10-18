@@ -6,6 +6,8 @@ import random
 import hashlib
 import asyncio
 import logging
+import openai
+from openai import AsyncOpenAI
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
@@ -62,6 +64,11 @@ CLOUDFLARE_CODE_URL = (
 CLOUDFLARE_CODE_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_CODE_MAX_TOKENS', '32768'))
 CLOUDFLARE_TEXT_TEMPERATURE = float(os.environ.get('CLOUDFLARE_TEXT_TEMPERATURE', '0.7'))
 CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '4096'))
+NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'z-ai/glm-5.3')
+NVIDIA_CODE_MODEL_FALLBACK = os.environ.get('NVIDIA_CODE_MODEL_FALLBACK', 'z-ai/glm-5.3-flash')
+NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
 
 
 # =====================================================================================
@@ -719,126 +726,192 @@ async def call_cloudflare_code(messages: List[dict], temperature: float = 0.7,
         if attempt < max_retries - 1:
             await asyncio.sleep(2 * (attempt + 1))
     raise RuntimeError(f"Cloudflare code model '{CLOUDFLARE_CODE_MODEL}' non raggiungibile dopo {max_retries} tentativi: {last_exc}")
-NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
-NVIDIA_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_CODE_MODELS = [m.strip() for m in os.environ.get(
-    'NVIDIA_CODE_MODELS',
-    'moonshotai/kimi-k2.6,nvidia/nemotron-3-ultra-550b-a55b,z-ai/glm-5.3'
-).split(',') if m.strip()]
-NVIDIA_STREAM_IDLE_TIMEOUT = float(os.environ.get('NVIDIA_STREAM_IDLE_TIMEOUT', '600'))
-NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
-nvidia_code_semaphore = asyncio.Semaphore(2)
+if not NVIDIA_API_KEY:
+    logger.error("⚠️  NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta di codice funzionera'.")
+else:
+    _masked = NVIDIA_API_KEY[:8] + "..." + NVIDIA_API_KEY[-4:] if len(NVIDIA_API_KEY) > 12 else "***"
+    logger.info(f"NVIDIA_API_KEY caricata correttamente ({_masked})")
+
+_nvidia_client: Optional[AsyncOpenAI] = None
+NVIDIA_RPS = float(os.environ.get('NVIDIA_RPS', '0.55'))
+nvidia_limiter = RateLimiter(rps=NVIDIA_RPS)
+nvidia_code_concurrency = asyncio.Semaphore(2)
 
 
-class NvidiaHTTPError(RuntimeError):
-    def __init__(self, status: int, detail: str):
-        super().__init__(f"NVIDIA {status}: {detail}")
-        self.status = status
+def _get_nvidia_client() -> AsyncOpenAI:
+    global _nvidia_client
+    if _nvidia_client is None:
+        if not NVIDIA_API_KEY:
+            raise RuntimeError("NVIDIA_API_KEY non configurata")
+        _nvidia_client = AsyncOpenAI(
+            base_url=NVIDIA_BASE_URL, api_key=NVIDIA_API_KEY, max_retries=0,
+            timeout=httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=30.0),
+        )
+    return _nvidia_client
 
 
-def _nvidia_code_body(model: str, messages: List[dict], max_tokens: int, reasoning: bool) -> dict:
-    if "nemotron" in model:
-        max_tokens = min(max_tokens, 8192)  # tetto del modello
-    body = {
-        "model": model, "messages": messages, "temperature": 1.0, "top_p": 0.95,
-        "max_tokens": max_tokens, "stream": True,
-    }
-    if reasoning:
-        if "nemotron" in model:
-            body["chat_template_kwargs"] = {"enable_thinking": True}
-            body["reasoning_budget"] = max_tokens // 2
-        elif "glm" in model:
-            body["chat_template_kwargs"] = {"enable_thinking": True}
-        else:
-            body["chat_template_kwargs"] = {"thinking": True}
-            body["reasoning_effort"] = "high"
+def _timeout_for_model(model: str) -> httpx.Timeout:
+    if model in (NVIDIA_CODE_MODEL, NVIDIA_CODE_MODEL_FALLBACK):
+        return httpx.Timeout(connect=15.0, read=None, write=60.0, pool=60.0)
+    return httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=30.0)
+
+
+def _concurrency_for_model(model: str) -> asyncio.Semaphore:
+    return nvidia_code_concurrency
+
+
+def _extra_body_for_model(model: str, thinking: bool) -> dict:
+    if model.startswith("openai/gpt-oss"):
+        return {}
+    if "glm" in model:
+        return {"chat_template_kwargs": {"enable_thinking": thinking}}
+    body = {"chat_template_kwargs": {"thinking": thinking}}
+    if model in [NVIDIA_CODE_MODEL, NVIDIA_CODE_MODEL_FALLBACK] and thinking:
+        body["reasoning_effort"] = "high"
     return body
 
 
-async def _nvidia_stream_once(body: dict) -> str:
-    headers = {"Authorization": f"Bearer {NVIDIA_API_KEY}", "Content-Type": "application/json"}
-    timeout = httpx.Timeout(connect=30.0, read=NVIDIA_STREAM_IDLE_TIMEOUT, write=60.0, pool=60.0)
-    chunks = []
-    started = time.monotonic()
-    got_first_chunk = False
-    reasoning_chars = 0
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", NVIDIA_CHAT_URL, headers=headers, json=body) as response:
-            if response.status_code != 200:
-                err = (await response.aread()).decode(errors="ignore")
-                raise NvidiaHTTPError(response.status_code, err[:500])
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if data_str == "[DONE]":
-                    break
-                if not got_first_chunk:
-                    got_first_chunk = True
-                    logger.info(f"NVIDIA NIM '{body['model']}': primo chunk dopo {time.monotonic() - started:.1f}s: {data_str[:300]}")
-                try:
-                    data = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                choices = data.get("choices") or []
-                delta = choices[0].get("delta", {}) if choices else {}
-                reasoning_piece = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                reasoning_chars += len(reasoning_piece)
-                piece = delta.get("content")
-                if piece:
-                    if not chunks:
-                        logger.info(f"NVIDIA NIM '{body['model']}': primo token dopo {time.monotonic() - started:.1f}s (reasoning: {reasoning_chars} caratteri)")
-                    chunks.append(piece)
-    return "".join(chunks)
-
-
-async def call_nvidia_code(messages: List[dict], max_tokens: int = NVIDIA_CODE_MAX_TOKENS) -> tuple:
-    """Prova i modelli di NVIDIA_CODE_MODELS in ordine. Restituisce (contenuto, modello_usato)."""
-    if not NVIDIA_API_KEY:
-        raise RuntimeError("NVIDIA_API_KEY non configurata")
+async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
+                             max_tokens: int = 16384, thinking: bool = False):
+    """
+    Parla con NVIDIA in stream=True - NON opzionale: il loro gateway ha un tetto
+    interno di ~300s (5 minuti) sulle richieste non-streaming. Con stream=True i
+    byte continuano ad arrivare e la connessione non scade, anche per generazioni
+    di 20+ minuti. Async generator: yield di ogni pezzo visibile.
+    """
+    client = _get_nvidia_client()
     openai_messages = _to_openai_messages(messages)
+    concurrency = _concurrency_for_model(model)
+
+    async with concurrency:
+        await nvidia_limiter.wait()
+        started = time.monotonic()
+        reasoning_chars = 0
+        content_chars = 0
+        first_token_at = None
+
+        extra_body = _extra_body_for_model(model, thinking)
+        per_request_timeout = _timeout_for_model(model)
+        create_kwargs = dict(
+            model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
+            max_tokens=max_tokens, stream=True, timeout=per_request_timeout,
+        )
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
+
+        logger.info(f"NVIDIA NIM: chiamata a '{model}' - max_tokens={max_tokens}, thinking={thinking}, stream=True (necessario per evitare il 504 NVIDIA su richieste >5min)")
+        response = await client.chat.completions.create(**create_kwargs)
+        logger.info(f"NVIDIA NIM: risposta HTTP ricevuta da '{model}' dopo {time.monotonic() - started:.1f}s, inizio lettura stream")
+
+        async for chunk in response:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            reasoning = getattr(delta, "reasoning_content", None)
+            if reasoning:
+                reasoning_chars += len(reasoning)
+                continue
+            if delta.content:
+                if first_token_at is None:
+                    first_token_at = time.monotonic() - started
+                    logger.info(f"NVIDIA NIM: primo token visibile da '{model}' dopo {first_token_at:.1f}s (reasoning finora: {reasoning_chars} caratteri)")
+                content_chars += len(delta.content)
+                yield delta.content
+
+        elapsed = time.monotonic() - started
+        if content_chars == 0 and reasoning_chars > 0:
+            logger.warning(f"NVIDIA NIM: '{model}' ha esaurito max_tokens={max_tokens} tutto in reasoning ({reasoning_chars} caratteri) - ZERO output visibile.")
+        logger.info(f"NVIDIA NIM: stream NVIDIA completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili, {reasoning_chars} di reasoning)")
+
+
+def _is_max_tokens_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(kw in msg for kw in ("max_tokens", "maximum context length", "max tokens", "too large", "exceeds"))
+
+
+async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7,
+                      max_tokens: int = 16384, thinking: bool = False, max_retries: int = 3) -> str:
+    """
+    Wrapper: consuma call_nvidia_stream (streaming verso NVIDIA, obbligatorio) e
+    accumula tutto il testo, restituendolo come blocco unico quando e' completo.
+    """
+    if not NVIDIA_API_KEY:
+        logger.error(f"NVIDIA NIM: richiesta bloccata PRIMA dell'invio - chiave assente (model={model})")
+        raise RuntimeError("NVIDIA_API_KEY non configurata")
+
+    current_max_tokens = max_tokens
     last_exc: Optional[Exception] = None
-    async with nvidia_code_semaphore:
-        for model in NVIDIA_CODE_MODELS:
-            reasoning = True
-            for attempt in range(3):
-                try:
-                    logger.info(f"NVIDIA NIM: invio a '{model}' (tentativo {attempt + 1}/3, reasoning={reasoning})")
-                    content = await _nvidia_stream_once(
-                        _nvidia_code_body(model, openai_messages, max_tokens, reasoning))
-                        
-                    if content.strip():
-                        logger.info(f"NVIDIA NIM: risposta da '{model}' ({len(content)} caratteri)")
-                        return content, model
-                    last_exc = RuntimeError("risposta vuota")
-                    logger.warning(f"NVIDIA NIM '{model}': risposta vuota, passo al modello successivo")
-                    break
-                except NvidiaHTTPError as e:
-                    last_exc = e
-                    logger.warning(f"NVIDIA NIM '{model}' tentativo {attempt + 1}/3: {e}")
-                    if e.status == 404:
-                        break
-                    if e.status == 400 and reasoning:
-                        reasoning = False  # riprova senza i parametri di reasoning
-                        continue
-                    if e.status in (429, 500, 502, 503, 504):
-                        await asyncio.sleep(3 * (attempt + 1))
-                        continue
-                    break
-                except httpx.ReadTimeout:
-                    last_exc = RuntimeError(f"nessun dato per {NVIDIA_STREAM_IDLE_TIMEOUT:.0f}s")
-                    logger.warning(f"NVIDIA NIM '{model}': stream fermo da {NVIDIA_STREAM_IDLE_TIMEOUT:.0f}s senza dati, passo al modello successivo")
-                    break
-               
-                except (httpx.HTTPError, asyncio.TimeoutError) as e:
-                    last_exc = e
-                    logger.warning(f"NVIDIA NIM '{model}' tentativo {attempt + 1}/3 errore di rete: {e}")
-                    await asyncio.sleep(3)
-    raise RuntimeError(f"NVIDIA NIM: nessun modello codice disponibile. Ultimo errore: {last_exc}")
+    for attempt in range(max_retries):
+        logger.info(f"NVIDIA NIM: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, thinking={thinking}, max_tokens={current_max_tokens})")
+        try:
+            chunks = []
+            async for piece in call_nvidia_stream(messages, model, temperature, current_max_tokens, thinking):
+                chunks.append(piece)
+            return "".join(chunks)
+        except openai.AuthenticationError as e:
+            logger.error(f"NVIDIA NIM: 401 - chiave sbagliata o revocata (model={model}): {e}")
+            raise RuntimeError(f"NVIDIA API key non valida o revocata: {e}") from e
+        except openai.BadRequestError as e:
+            if _is_max_tokens_error(e) and current_max_tokens > 2048:
+                new_max = current_max_tokens // 2
+                logger.warning(f"NVIDIA NIM: max_tokens={current_max_tokens} rifiutato da '{model}' (400), riprovo con {new_max}")
+                current_max_tokens = new_max
+                last_exc = e
+                continue
+            logger.error(f"NVIDIA NIM: 400 (model={model}): {e}")
+            raise RuntimeError(f"NVIDIA API richiesta non valida: {e}") from e
+        except openai.RateLimitError as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                wait_s = min(2 ** attempt * 2, 20)
+                logger.warning(f"NVIDIA NIM 429 (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
+                await asyncio.sleep(wait_s)
+                continue
+            break
+        except (openai.APIConnectionError, openai.APITimeoutError) as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                logger.warning(f"NVIDIA NIM: connessione/timeout (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                await asyncio.sleep(2)
+                continue
+            break
+        except openai.InternalServerError as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                logger.warning(f"NVIDIA NIM: errore server 5xx (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                await asyncio.sleep(3)
+                continue
+            break
+        except openai.APIStatusError as e:
+            logger.error(f"NVIDIA NIM: errore {e.status_code} (model={model}): {e.message}")
+            last_exc = e
+            break
+
+    raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
-
-
+async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) -> tuple:
+    """
+    Prova prima NVIDIA_CODE_MODEL (GLM 5.3). Se fallisce del tutto (dopo tutti
+    i retry interni di call_nvidia), ritenta su NVIDIA_CODE_MODEL_FALLBACK.
+    Restituisce (content, model_effettivamente_usato).
+    """
+    try:
+        content = await call_nvidia(
+            messages, model=NVIDIA_CODE_MODEL, temperature=1.0,
+            max_tokens=max_tokens, thinking=True,
+        )
+        return content, NVIDIA_CODE_MODEL
+    except Exception as primary_exc:
+        logger.warning(
+            f"NVIDIA NIM: modello primario '{NVIDIA_CODE_MODEL}' fallito del tutto dopo tutti i retry, "
+            f"passo al fallback '{NVIDIA_CODE_MODEL_FALLBACK}': {primary_exc}"
+        )
+        content = await call_nvidia(
+            messages, model=NVIDIA_CODE_MODEL_FALLBACK, temperature=1.0,
+            max_tokens=max_tokens, thinking=True,
+        )
+        return content, NVIDIA_CODE_MODEL_FALLBACK
 
 
 
@@ -1240,7 +1313,7 @@ def _cleanup_ai_jobs():
 async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: User):
     try:
         if is_code:
-            content, provider_label = await call_nvidia_code(messages)
+            content, provider_label = await call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS)
         else:
             content = await call_cloudflare_text(messages)
             provider_label = "cloudflare_workers_ai"
