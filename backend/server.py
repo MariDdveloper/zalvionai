@@ -58,7 +58,7 @@ CLOUDFLARE_TEXT_URL = (
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
 )
 CLOUDFLARE_TEXT_TEMPERATURE = float(os.environ.get('CLOUDFLARE_TEXT_TEMPERATURE', '0.7'))
-CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '4096'))
+CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '3000'))
 # 2) CLASSIFICAZIONE (is_code_request + filtro immagini)
 CLOUDFLARE_CLASSIFY_ACCOUNT_ID = os.environ.get('CLOUDFLARE_CLASSIFY_ACCOUNT_ID')
 CLOUDFLARE_CLASSIFY_API_TOKEN = os.environ.get('CLOUDFLARE_CLASSIFY_API_TOKEN')
@@ -732,10 +732,10 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
     di token in reasoning_content prima del content vero, rallentando tutto.
     """
     headers = {
-        "Authorization": f"Bearer {token or CLOUDFLARE_TEXT_API_TOKEN}",
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
         "Content-Type": "application/json",
     }
-    agree_payload = {"prompt": "agree"}
+    
     payload = {
         "messages": messages,
         "stream": True,
