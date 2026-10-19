@@ -7,6 +7,7 @@ import hashlib
 import asyncio
 import logging
 import openai
+import pypdf
 from openai import AsyncOpenAI
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
@@ -51,19 +52,27 @@ EXA_API_KEY = os.environ.get('EXA_API_KEY')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 CLOUDFLARE_TEXT_ACCOUNT_ID = "53883d6ffd5f05104d800edf7d61f7cb"   # nuovo account, diverso da quello immagini
 CLOUDFLARE_TEXT_API_TOKEN = os.environ.get('CLOUDFLARE_API_KEY')
-CLOUDFLARE_TEXT_MODEL = "@cf/google/gemma-4-26b-a4b-it"  # verifica lo slug esatto nel dashboard
+CLOUDFLARE_TEXT_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"  # verifica lo slug esatto nel dashboard
 CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
 )
-CLOUDFLARE_CODE_MODEL = os.environ.get('CLOUDFLARE_CODE_MODEL', '@cf/zai-org/glm-5.2')
-CLOUDFLARE_CODE_URL = (
-    f"https://api.cloudflare.com/client/v4/accounts/"
-    f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_CODE_MODEL}"
-)
-CLOUDFLARE_CODE_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_CODE_MAX_TOKENS', '32768'))
 CLOUDFLARE_TEXT_TEMPERATURE = float(os.environ.get('CLOUDFLARE_TEXT_TEMPERATURE', '0.7'))
 CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '4096'))
+# 2) CLASSIFICAZIONE (is_code_request + filtro immagini)
+CLOUDFLARE_CLASSIFY_ACCOUNT_ID = os.environ.get('CLOUDFLARE_CLASSIFY_ACCOUNT_ID')
+CLOUDFLARE_CLASSIFY_API_TOKEN = os.environ.get('CLOUDFLARE_CLASSIFY_API_TOKEN')
+CLOUDFLARE_CLASSIFY_MODEL = os.environ.get('CLOUDFLARE_CLASSIFY_MODEL', '@cf/meta/llama-3.2-1b-instruct')
+CLOUDFLARE_CLASSIFY_URL = (
+    f"https://api.cloudflare.com/client/v4/accounts/"
+    f"{CLOUDFLARE_CLASSIFY_ACCOUNT_ID}/ai/run/{CLOUDFLARE_CLASSIFY_MODEL}"
+)
+
+# 3) IMMAGINI (Flux 1 schnell)
+CLOUDFLARE_IMAGE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_IMAGE_ACCOUNT_ID')
+CLOUDFLARE_IMAGE_API_TOKEN = os.environ.get('CLOUDFLARE_IMAGE_API_TOKEN')
+CLOUDFLARE_IMAGE_MODEL = os.environ.get('CLOUDFLARE_IMAGE_MODEL', '@cf/black-forest-labs/flux-1-schnell')
+CLOUDFLARE_IMAGE_STEPS = int(os.environ.get('CLOUDFLARE_IMAGE_STEPS', '4'))
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'z-ai/glm-5.3')
@@ -639,6 +648,78 @@ def _to_openai_messages(messages: List[dict]) -> List[dict]:
                 text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
         converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
     return converted
+def _guess_image_mime(b64: str) -> str:
+    head = (b64 or "")[:12]
+    if head.startswith("iVBOR"):
+        return "image/png"
+    if head.startswith("/9j/"):
+        return "image/jpeg"
+    if head.startswith("R0lGOD"):
+        return "image/gif"
+    if head.startswith("UklGR"):
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _to_cloudflare_messages(messages: List[dict]) -> List[dict]:
+    """Come _to_openai_messages, ma lascia passare le immagini al modello (Gemma ha la vision)."""
+    converted = []
+    for m in messages:
+        content = m["content"]
+        if isinstance(content, str):
+            converted.append({"role": m["role"], "content": content})
+            continue
+        parts = []
+        for part in content:
+            if part["type"] == "text":
+                if part["text"]:
+                    parts.append({"type": "text", "text": part["text"]})
+            elif part["type"] == "image_url":
+                img = part["image_url"]
+                if isinstance(img, dict):
+                    img = img.get("url", "")
+                if img:
+                    parts.append({"type": "image_url", "image_url": {"url": img}})
+            elif part["type"] == "document_url":
+                parts.append({"type": "text", "text": "[PDF attachment could not be read]"})
+        if not parts:
+            parts = [{"type": "text", "text": " "}]
+        if all(p["type"] == "text" for p in parts):
+            converted.append({"role": m["role"], "content": "\n".join(p["text"] for p in parts)})
+        else:
+            converted.append({"role": m["role"], "content": parts})
+    return converted
+
+
+async def extract_pdf_text(b64_pdf: str, max_chars: int = 100000) -> str:
+    def _extract():
+        reader = pypdf.PdfReader(io.BytesIO(base64.b64decode(b64_pdf)))
+        parts, total = [], 0
+        for page in reader.pages:
+            t = page.extract_text() or ""
+            parts.append(t)
+            total += len(t)
+            if total >= max_chars:
+                break
+        return "\n\n".join(parts)[:max_chars]
+    return await asyncio.to_thread(_extract)
+
+
+async def prepare_attachments(body: ChatGenerateBody) -> None:
+    """Trasforma i PDF dell'ultimo messaggio utente in allegati di testo (kind='file')."""
+    last_user = next((m for m in reversed(body.messages) if m.role == "user"), None)
+    if not last_user:
+        return
+    for att in last_user.attachments:
+        if att.kind == "pdf" and att.b64:
+            try:
+                text = await extract_pdf_text(att.b64)
+            except Exception as e:
+                logger.warning(f"Lettura PDF '{att.name}' fallita: {e}")
+                text = ""
+            att.kind = "file"
+            att.text = text if text.strip() else "(no selectable text found - the PDF may be scanned)"
+            att.b64 = ""
 async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096,
                                   url: str = None, token: str = None, thinking: bool = False):
     """
@@ -698,7 +779,7 @@ async def call_cloudflare_text(messages: List[dict], temperature: float = CLOUDF
     testo in un'unica stringa (stesso pattern di call_nvidia rispetto a
     call_nvidia_stream), cosi' si integra nel job store esistente.
     """
-    openai_messages = _to_openai_messages(messages)
+    openai_messages = _to_cloudflare_messages(messages)
     chunks = []
     async for piece in stream_cloudflare_text(openai_messages, temperature=temperature, max_tokens=max_tokens):
         chunks.append(piece)
@@ -944,7 +1025,7 @@ async def is_unsafe_image_prompt(prompt: str) -> bool:
     try:
         chunks = []
         async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5,
-                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_API_TOKEN):
+                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_CLASSIFY_API_TOKEN):
             chunks.append(piece)
             
         answer = "".join(chunks).strip().lower()
@@ -955,17 +1036,16 @@ async def is_unsafe_image_prompt(prompt: str) -> bool:
         return True
 
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
-    """
-    Genera un'immagine con Flux 1 [schnell] su Cloudflare Workers AI (piano gratuito,
-    10.000 Neuron/giorno, 720 richieste/minuto, nessuna carta richiesta).
-    NB: il modello accetta solo prompt + steps - non supporta width/height custom.
-    Restituisce (bytes, content_type).
-    """
-    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
-        raise RuntimeError("CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN non configurate nel file .env")
-    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
-    headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"}
-    payload = {"prompt": prompt, "steps": CLOUDFLARE_IMAGE_STEPS}
+    """Flux 1 [schnell] sull'account IMMAGINI. Restituisce (bytes, content_type)."""
+    if not CLOUDFLARE_IMAGE_ACCOUNT_ID or not CLOUDFLARE_IMAGE_API_TOKEN:
+        raise RuntimeError("CLOUDFLARE_IMAGE_ACCOUNT_ID / CLOUDFLARE_IMAGE_API_TOKEN non configurate")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_IMAGE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+    headers = {"Authorization": f"Bearer {CLOUDFLARE_IMAGE_API_TOKEN}", "Content-Type": "application/json"}
+    payload = {
+        "prompt": prompt[:2048],  # limite del modello
+        "steps": CLOUDFLARE_IMAGE_STEPS,
+        "seed": random.randint(1, 999999999),
+    }
 
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
@@ -980,8 +1060,7 @@ async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_ret
             data = r.json()
             if not data.get("success", False):
                 raise RuntimeError(f"Cloudflare Workers AI errore: {data.get('errors')}")
-            b64_img = data["result"]["image"]
-            return base64.b64decode(b64_img), "image/jpeg"
+            return base64.b64decode(data["result"]["image"]), "image/jpeg"
         except (httpx.RequestError, KeyError, IndexError, TypeError) as e:
             last_exc = e
             if attempt < max_retries - 1:
@@ -1252,7 +1331,7 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
     try:
         chunks = []
         async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5,
-                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_API_TOKEN):
+                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_CLASSIFY_API_TOKEN):
             chunks.append(piece)
         answer = "".join(chunks).strip().lower()
         return answer.startswith("true")
@@ -1277,7 +1356,7 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
             parts.append({"type": "text", "text": m.content})
         for att in m.attachments:
             if att.kind == "image" and att.b64:
-                parts.append({"type": "image_url", "image_url": f"data:image/jpeg;base64,{att.b64}"})
+                parts.append({"type": "image_url", "image_url": f"data:{_guess_image_mime(att.b64)};base64,{att.b64}"})
             elif att.kind == "pdf" and att.b64:
                 parts.append({"type": "document_url", "document_url": ""})
             elif att.kind == "file" and att.text:
@@ -1345,6 +1424,7 @@ async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_cur
     """
     _cleanup_ai_jobs()
     await enrich_attachments_with_ai_analysis(body)
+    await prepare_attachments(body)
     messages = build_messages(body)
 
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
@@ -1458,26 +1538,16 @@ async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_cu
     }
 @api_router.post("/ai/generate-image-pollinations")
 async def ai_generate_image_pollinations(body: PollinationsImageBody, user: User = Depends(get_current_user)):
-    """
-    Costruisce l'URL immagine di Pollinations AI (gratuito, nessun limite di
-    piano) SOLO dopo il controllo di sicurezza lato backend - il frontend non
-    costruisce più l'URL da solo, quindi non può bypassare il filtro.
-    Stessi parametri di lib/pollinations.js (width/height 1024, model=flux,
-    nologo, referrer), seed casuale generato qui invece che nel browser.
-    Non richiama enforce_and_increment: il conteggio giornaliero è già
-    gestito da /chats/{chat_id}/messages/user, chiamato dal frontend prima
-    di questo endpoint (stesso comportamento di prima, invariato).
-    """
     if await is_unsafe_image_prompt(body.prompt):
-        raise HTTPException(status_code=400, detail="Questo tipo di immagine non può essere generata.")
+        raise HTTPException(status_code=400, detail="This type of image cannot be generated.")
     prompt_text = (body.prompt or "").strip() or "a beautiful high quality image"
-    encoded = quote(prompt_text, safe="")
-    seed = random.randint(0, 999999999)
-    image_url = (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width=1024&height=1024&seed={seed}&model=flux&nologo=true&referrer=zalvionai.com"
-    )
-    return {"image_url": image_url}
+    try:
+        content, content_type = await call_cloudflare_flux_image(prompt_text)
+    except Exception as e:
+        logger.error(f"Cloudflare Flux image error: {e}")
+        raise HTTPException(status_code=502, detail=image_quota_message("en"))
+    b64 = base64.b64encode(content).decode()
+    return {"image_url": f"data:{content_type};base64,{b64}"}
 @api_router.post("/tts")
 async def text_to_speech(body: TTSBody, user: User = Depends(get_current_user)):
     text = (body.text or "").strip()
