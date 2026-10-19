@@ -784,29 +784,6 @@ async def call_cloudflare_text(messages: List[dict], temperature: float = CLOUDF
     async for piece in stream_cloudflare_text(openai_messages, temperature=temperature, max_tokens=max_tokens):
         chunks.append(piece)
     return "".join(chunks)
-async def call_cloudflare_code(messages: List[dict], temperature: float = 0.7,
-                               max_tokens: int = CLOUDFLARE_CODE_MAX_TOKENS, max_retries: int = 3) -> str:
-    """Generazione codice su Cloudflare Workers AI (GLM), thinking sempre attivo."""
-    openai_messages = _to_openai_messages(messages)
-    last_exc: Optional[Exception] = None
-    for attempt in range(max_retries):
-        try:
-            chunks = []
-            async for piece in stream_cloudflare_text(
-                openai_messages, temperature=temperature, max_tokens=max_tokens,
-                url=CLOUDFLARE_CODE_URL, thinking=True,
-            ):
-                chunks.append(piece)
-            content = "".join(chunks)
-            if content.strip():
-                return content
-            last_exc = RuntimeError("risposta vuota (token esauriti nel reasoning?)")
-        except Exception as e:
-            last_exc = e
-        logger.warning(f"Cloudflare code model '{CLOUDFLARE_CODE_MODEL}' tentativo {attempt + 1}/{max_retries} fallito: {last_exc}")
-        if attempt < max_retries - 1:
-            await asyncio.sleep(2 * (attempt + 1))
-    raise RuntimeError(f"Cloudflare code model '{CLOUDFLARE_CODE_MODEL}' non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 if not NVIDIA_API_KEY:
     logger.error("⚠️  NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta di codice funzionera'.")
 else:
