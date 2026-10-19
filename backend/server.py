@@ -52,7 +52,7 @@ EXA_API_KEY = os.environ.get('EXA_API_KEY')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 CLOUDFLARE_TEXT_ACCOUNT_ID = "53883d6ffd5f05104d800edf7d61f7cb"   # nuovo account, diverso da quello immagini
 CLOUDFLARE_TEXT_API_TOKEN = os.environ.get('CLOUDFLARE_API_KEY')
-CLOUDFLARE_TEXT_MODEL = "@cf/meta/llama-3.2-11b-vision-instruct"  # verifica lo slug esatto nel dashboard
+CLOUDFLARE_TEXT_MODEL = "@cf/google/paligemma-3b-mix-448"  # verifica lo slug esatto nel dashboard
 CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
@@ -62,7 +62,7 @@ CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '4
 # 2) CLASSIFICAZIONE (is_code_request + filtro immagini)
 CLOUDFLARE_CLASSIFY_ACCOUNT_ID = os.environ.get('CLOUDFLARE_CLASSIFY_ACCOUNT_ID')
 CLOUDFLARE_CLASSIFY_API_TOKEN = os.environ.get('CLOUDFLARE_CLASSIFY_API_TOKEN')
-CLOUDFLARE_CLASSIFY_MODEL = os.environ.get('CLOUDFLARE_CLASSIFY_MODEL', '@cf/meta/llama-3.2-1b-instruct')
+CLOUDFLARE_CLASSIFY_MODEL = os.environ.get('CLOUDFLARE_CLASSIFY_MODEL', '@cf/google/gemma-2b-it')
 CLOUDFLARE_CLASSIFY_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_CLASSIFY_ACCOUNT_ID}/ai/run/{CLOUDFLARE_CLASSIFY_MODEL}"
