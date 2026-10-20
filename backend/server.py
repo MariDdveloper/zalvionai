@@ -1301,7 +1301,7 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
     try:
         chunks = []
         async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5,
-                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_CLASSIFY_API_TOKEN):
+                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_TEXT_API_TOKEN):
             chunks.append(piece)
         answer = "".join(chunks).strip().lower()
         return answer.startswith("true")
@@ -1317,7 +1317,8 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
     lo stream aveva un placeholder al posto della logica vera).
     """
     lang_name = LANG_NAMES.get(body.language, "English")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
+    # Svuotiamo la lista iniziale per evitare conflitti con il ruolo 'system' su Cloudflare
+    messages = []
 
     trimmed_messages = body.messages[-MAX_HISTORY_MESSAGES:]
     for m in trimmed_messages:
@@ -1337,7 +1338,17 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
             messages.append({"role": m.role, "content": parts[0]["text"]})
         else:
             messages.append({"role": m.role, "content": parts})
+
+    # Iniezione sicura del System Prompt all'inizio del primo messaggio dell'utente
+    sys_content = SYSTEM_PROMPT.format(lang=lang_name)
+    if messages and messages[0]["role"] == "user":
+        if isinstance(messages[0]["content"], str):
+            messages[0]["content"] = f"{sys_content}\n\n[User Request]: {messages[0]['content']}"
+        elif isinstance(messages[0]["content"], list):
+            messages[0]["content"].insert(0, {"type": "text", "text": sys_content})
+
     return messages
+
 # =====================================================================================
 # JOB STORE PER GENERAZIONE ASINCRONA — evita di tenere aperta una singola richiesta
 # HTTP per tutta la durata della generazione (rischio di 504 lato proxy/browser
