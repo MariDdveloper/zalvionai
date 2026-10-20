@@ -227,15 +227,7 @@ CODE_EXTENSIONS = (
 )
 
 # ---- Cloudflare Workers AI (SOLO generazione immagini - Flux 1 schnell, piano free, 720 req/min) ----
-CLOUDFLARE_ACCOUNT_ID = os.environ.get('CLOUDFLARE_ACCOUNT_ID')
-CLOUDFLARE_API_TOKEN = os.environ.get('CLOUDFLARE_API_TOKEN')
-CLOUDFLARE_IMAGE_MODEL = os.environ.get('CLOUDFLARE_IMAGE_MODEL', '@cf/black-forest-labs/flux-1-schnell')
-CLOUDFLARE_IMAGE_STEPS = int(os.environ.get('CLOUDFLARE_IMAGE_STEPS', '8'))
-CLOUDFLARE_CLASSIFY_MODEL = os.environ.get('CLOUDFLARE_CLASSIFY_MODEL', CLOUDFLARE_TEXT_MODEL)
-CLOUDFLARE_CLASSIFY_URL = (
-    f"https://api.cloudflare.com/client/v4/accounts/"
-    f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_CLASSIFY_MODEL}"
-)
+
 
 PAYPAL_MODE = os.environ.get('PAYPAL_MODE', 'sandbox')
 PAYPAL_CLIENT_ID = os.environ.get('PAYPAL_CLIENT_ID', '')
@@ -732,7 +724,7 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
     di token in reasoning_content prima del content vero, rallentando tutto.
     """
     headers = {
-        "Authorization": f"Bearer {token or CLOUDFLARE_API_TOKEN}",
+        "Authorization": f"Bearer {CLOUDFLARE_TEXT_API_TOKEN}",
         "Content-Type": "application/json",
     }
     
