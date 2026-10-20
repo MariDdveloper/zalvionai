@@ -58,7 +58,7 @@ CLOUDFLARE_TEXT_URL = (
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
 )
 CLOUDFLARE_TEXT_TEMPERATURE = float(os.environ.get('CLOUDFLARE_TEXT_TEMPERATURE', '0.7'))
-CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '3000'))
+CLOUDFLARE_TEXT_MAX_TOKENS = int(os.environ.get('CLOUDFLARE_TEXT_MAX_TOKENS', '1024'))
 # 2) CLASSIFICAZIONE (is_code_request + filtro immagini)
 CLOUDFLARE_CLASSIFY_ACCOUNT_ID = os.environ.get('CLOUDFLARE_CLASSIFY_ACCOUNT_ID')
 CLOUDFLARE_CLASSIFY_API_TOKEN = os.environ.get('CLOUDFLARE_CLASSIFY_API_TOKEN')
@@ -712,7 +712,7 @@ async def prepare_attachments(body: ChatGenerateBody) -> None:
             att.kind = "file"
             att.text = text if text.strip() else "(no selectable text found - the PDF may be scanned)"
             att.b64 = ""
-async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7, max_tokens: int = 4096,
+async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7, max_tokens: int = 1024,
                                   url: str = None, token: str = None, thinking: bool = False):
     """
     Streamma la risposta testuale da Cloudflare Workers AI (SSE).
