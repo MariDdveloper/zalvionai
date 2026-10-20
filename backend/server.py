@@ -732,7 +732,7 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
     di token in reasoning_content prima del content vero, rallentando tutto.
     """
     headers = {
-        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
+        "Authorization": f"Bearer {token or CLOUDFLARE_API_TOKEN}",
         "Content-Type": "application/json",
     }
     
