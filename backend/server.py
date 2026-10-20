@@ -1311,13 +1311,12 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
 
 def build_messages(body: ChatGenerateBody) -> List[dict]:
     """
-    Costruisce la lista messaggi (system prompt + storico troncato + allegati)
-    usata sia da /ai/generate che da /ai/generate/stream - unica funzione condivisa
-    cosi' i due endpoint non possono mai disallinearsi.
+    Costruisce la lista messaggi iniettando il System Prompt nativamente
+    dentro il primo messaggio dell'utente per costringere Mistral a parlare 
+    la lingua corretta.
     """
     lang_name = LANG_NAMES.get(body.language, "English")
-    # Ripristinato il ruolo system nativo separato
-    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
+    messages = []
 
     trimmed_messages = body.messages[-MAX_HISTORY_MESSAGES:]
     for m in trimmed_messages:
@@ -1337,7 +1336,15 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
             messages.append({"role": m.role, "content": parts[0]["text"]})
         else:
             messages.append({"role": m.role, "content": parts})
-            
+
+    # TRUCCO DEFINITIVO PER MISTRAL: Iniezione del prompt nel primo messaggio user
+    sys_content = SYSTEM_PROMPT.format(lang=lang_name)
+    if messages and messages[0]["role"] == "user":
+        if isinstance(messages[0]["content"], str):
+            messages[0]["content"] = f"Instructions: {sys_content}\n\n[User Request]: {messages[0]['content']}"
+        elif isinstance(messages[0]["content"], list):
+            messages[0]["content"].insert(0, {"type": "text", "text": f"Instructions: {sys_content}\n\n[User Request]: "})
+
     return messages
 
 # =====================================================================================
