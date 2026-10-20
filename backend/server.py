@@ -52,7 +52,7 @@ EXA_API_KEY = os.environ.get('EXA_API_KEY')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 CLOUDFLARE_TEXT_ACCOUNT_ID = "53883d6ffd5f05104d800edf7d61f7cb"   # nuovo account, diverso da quello immagini
 CLOUDFLARE_TEXT_API_TOKEN = os.environ.get('CLOUDFLARE_API_KEY')
-CLOUDFLARE_TEXT_MODEL = "@cf/google/gemma-7b-it-lora"  # verifica lo slug esatto nel dashboard
+CLOUDFLARE_TEXT_MODEL = "@cf/qwen/qwen1.5-14b-chat"  # verifica lo slug esatto nel dashboard
 CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
@@ -1313,12 +1313,11 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
     """
     Costruisce la lista messaggi (system prompt + storico troncato + allegati)
     usata sia da /ai/generate che da /ai/generate/stream - unica funzione condivisa
-    cosi' i due endpoint non possono mai disallinearsi (era proprio questo il bug:
-    lo stream aveva un placeholder al posto della logica vera).
+    cosi' i due endpoint non possono mai disallinearsi.
     """
     lang_name = LANG_NAMES.get(body.language, "English")
-    # Svuotiamo la lista iniziale per evitare conflitti con il ruolo 'system' su Cloudflare
-    messages = []
+    # Ripristinato il ruolo system nativo separato
+    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(lang=lang_name)}]
 
     trimmed_messages = body.messages[-MAX_HISTORY_MESSAGES:]
     for m in trimmed_messages:
@@ -1338,15 +1337,7 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
             messages.append({"role": m.role, "content": parts[0]["text"]})
         else:
             messages.append({"role": m.role, "content": parts})
-
-    # Iniezione sicura del System Prompt all'inizio del primo messaggio dell'utente
-    sys_content = SYSTEM_PROMPT.format(lang=lang_name)
-    if messages and messages[0]["role"] == "user":
-        if isinstance(messages[0]["content"], str):
-            messages[0]["content"] = f"{sys_content}\n\n[User Request]: {messages[0]['content']}"
-        elif isinstance(messages[0]["content"], list):
-            messages[0]["content"].insert(0, {"type": "text", "text": sys_content})
-
+            
     return messages
 
 # =====================================================================================
