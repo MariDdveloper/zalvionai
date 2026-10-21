@@ -1997,7 +1997,7 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
             "usage_used": used,
             "usage_limit": daily_limit_for(user.plan),
         }
-        except Exception as e:
+    except Exception as e:
          logger.error(f"AI job error (job {job_id}): {e}")
          job = _ai_jobs.get(job_id)
          if job is not None:
