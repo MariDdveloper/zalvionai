@@ -1718,6 +1718,7 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
                     raise
 
         used = await get_usage_today(user.user_id)
+        logger.info(f"AI job {job_id} completato con provider '{provider_label}'")
         job = _ai_jobs.get(job_id)
         if job is None:  # job scaduto/ripulito nel frattempo
             return
