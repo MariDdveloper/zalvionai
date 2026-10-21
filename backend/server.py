@@ -52,7 +52,7 @@ EXA_API_KEY = os.environ.get('EXA_API_KEY')
 exa_client = AsyncExa(api_key=EXA_API_KEY) if EXA_API_KEY else None
 CLOUDFLARE_TEXT_ACCOUNT_ID = "53883d6ffd5f05104d800edf7d61f7cb"   # nuovo account, diverso da quello immagini
 CLOUDFLARE_TEXT_API_TOKEN = os.environ.get('CLOUDFLARE_API_KEY')
-CLOUDFLARE_TEXT_MODEL = "@cf/mistral/mistral-7b-instruct-v0.2-lora"  # verifica lo slug esatto nel dashboard
+CLOUDFLARE_TEXT_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8"  # verifica lo slug esatto nel dashboard
 CLOUDFLARE_TEXT_URL = (
     f"https://api.cloudflare.com/client/v4/accounts/"
     f"{CLOUDFLARE_TEXT_ACCOUNT_ID}/ai/run/{CLOUDFLARE_TEXT_MODEL}"
