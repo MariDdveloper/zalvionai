@@ -1377,16 +1377,6 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
 
 
 def build_messages(body: ChatGenerateBody, search_context: str = "") -> List[dict]:
-    """
-    Costruisce la lista messaggi. Fix lingua (Mistral 7B rispondeva sempre in inglese):
-      1. le istruzioni vanno nel PRIMO messaggio *user* reale (prima, se la cronologia
-         troncata iniziava con un 'assistant', non venivano iniettate affatto);
-      2. un promemoria di lingua, scritto nella lingua target, va in CODA all'ultimo
-         messaggio utente: i modelli piccoli danno peso soprattutto agli ultimi token;
-      3. il contesto di ricerca web NON e' piu' un messaggio 'system' inserito a
-         posizione 1 (rompeva l'alternanza user/assistant richiesta da Mistral e non
-         veniva letto): ora e' dentro l'ultimo messaggio utente.
-    """
     lang_name = LANG_NAMES.get(body.language, "English")
     reminder = LANG_REMINDERS.get(body.language, f"Reply exclusively in {lang_name}.")
     messages: List[dict] = []
@@ -1416,23 +1406,24 @@ def build_messages(body: ChatGenerateBody, search_context: str = "") -> List[dic
     messages = messages[first_user:]
     last_user = max(i for i, m in enumerate(messages) if m["role"] == "user")
 
-    # Ultimo messaggio utente: contesto web in testa, promemoria lingua in coda
+    # Contesto web nell'ultimo messaggio utente (non come messaggio 'system')
     if search_context:
         messages[last_user]["content"] = _prepend_text(
             messages[last_user]["content"], f"{search_context}\n\n[User message]: "
         )
-    messages[last_user]["content"] = _append_text(
-        messages[last_user]["content"], f"\n\n[{reminder}]"
-    )
+        # Promemoria di lingua solo se c'e' contesto web
+        messages[last_user]["content"] = _append_text(
+            messages[last_user]["content"], f"\n\n({reminder})"
+        )
 
-    # Primo messaggio utente: istruzioni di sistema
+    # Istruzioni come scambio "finto" a inizio conversazione: user -> assistant
     sys_content = SYSTEM_PROMPT.format(lang=lang_name)
-    messages[0]["content"] = _prepend_text(
-        messages[0]["content"], f"[Instructions]\n{sys_content}\n[End instructions]\n\n"
-    )
-
-    return messages
-
+    ack = LANG_ACKS.get(body.language, "OK.")
+    priming = [
+        {"role": "user", "content": f"{sys_content}\n\n{reminder}"},
+        {"role": "assistant", "content": ack},
+    ]
+    return priming + messages
 
 # =====================================================================================
 # JOB STORE PER GENERAZIONE ASINCRONA
