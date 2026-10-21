@@ -652,6 +652,26 @@ LANG_REMINDERS = {
     "de": "Antworte ausschließlich auf Deutsch.",
     "pt": "Responda exclusivamente em português.",
 }
+LANG_ACKS = {
+    "it": "Capito. Risponderò sempre in italiano, in modo naturale e diretto.",
+    "en": "Understood. I will always reply in English.",
+    "es": "Entendido. Responderé siempre en español.",
+    "fr": "Compris. Je répondrai toujours en français.",
+    "de": "Verstanden. Ich antworte immer auf Deutsch.",
+    "pt": "Entendido. Responderei sempre em português.",
+}
+
+
+def _prepend_text(content, text: str):
+    if isinstance(content, str):
+        return text + content
+    return [{"type": "text", "text": text}] + list(content)
+
+
+def _append_text(content, text: str):
+    if isinstance(content, str):
+        return content + text
+    return list(content) + [{"type": "text", "text": text}]
 
 # Riferimenti ai task in background: senza, asyncio puo' garbage-collectarli a meta' lavoro.
 _background_tasks: set = set()
