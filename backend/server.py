@@ -929,8 +929,8 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
     return body
 
 
-async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.3,
-                             max_tokens: int = 32768, thinking: bool = False):
+async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
+                             max_tokens: int = 16384, thinking: bool = False):
     """
     Stream verso NVIDIA (obbligatorio: il gateway chiude le richieste non-stream
     dopo ~300s). Async generator che emette solo il testo visibile.
