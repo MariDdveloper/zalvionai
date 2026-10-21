@@ -1121,7 +1121,6 @@ async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_ret
     payload = {
         "prompt": prompt[:2048],
         "steps": CLOUDFLARE_IMAGE_STEPS,
-        "seed": random.randint(1, 999999999),
     }
 
     last_exc: Optional[Exception] = None
