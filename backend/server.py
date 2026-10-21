@@ -1101,7 +1101,7 @@ async def is_unsafe_image_prompt(prompt: str) -> bool:
         chunks = []
         async for piece in stream_cloudflare_text(
             classify_messages, temperature=0.0, max_tokens=5,
-            url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_CLASSIFY_API_TOKEN, thinking=False,
+            url=CLOUDFLARE_TEXT_URL, token=CLOUDFLARE_TEXT_API_TOKEN, thinking=False,
         ):
             chunks.append(piece)
         answer = "".join(chunks).strip().lower()
@@ -1386,7 +1386,7 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
         chunks = []
         async for piece in stream_cloudflare_text(
             classify_messages, temperature=0.0, max_tokens=5,
-            url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_CLASSIFY_API_TOKEN, thinking=False,
+            url=CLOUDFLARE_TEXT_URL, token=CLOUDFLARE_TEXT_API_TOKEN, thinking=False,
         ):
             chunks.append(piece)
         answer = "".join(chunks).strip().lower()
