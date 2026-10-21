@@ -623,23 +623,43 @@ def image_quota_message(lang: str) -> str:
 
 
 
-def _to_openai_messages(messages: List[dict]) -> List[dict]:
-    converted = []
-    for m in messages:
-        content = m["content"]
-        if isinstance(content, str):
-            converted.append({"role": m["role"], "content": content})
-            continue
-        text_chunks = []
-        for part in content:
-            if part["type"] == "text":
-                text_chunks.append(part["text"])
-            elif part["type"] == "image_url":
-                text_chunks.append("[Allegato immagine ricevuto: analisi immagini temporaneamente non disponibile]")
-            elif part["type"] == "document_url":
-                text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
-        converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
-    return converted
+# =====================================================================================
+# ZALVION AI - BLOCCO AI CORRETTO
+# Sostituisce per intero il blocco incollato (dalle funzioni di conversione messaggi
+# fino a /ai/generate/status). Dipendenze esterne invariate: pypdf, httpx, openai,
+# AsyncOpenAI, RateLimiter, now_utc, sb_*, resend, ecc. restano definiti altrove.
+#
+# Variabili d'ambiente / costanti opzionali nuove (hanno un default sicuro):
+#   CLOUDFLARE_TEXT_VISION = "1"  -> solo se il modello di testo ha davvero la vision
+#   PDF_MAX_CHARS                  -> tetto caratteri estratti da un PDF
+# =====================================================================================
+
+# --- Costanti nuove -------------------------------------------------------------------
+CLOUDFLARE_TEXT_VISION = os.environ.get("CLOUDFLARE_TEXT_VISION", "0") == "1"
+PDF_MAX_CHARS = int(os.environ.get("PDF_MAX_CHARS", "12000"))  # Mistral 7B ha contesto corto
+# Mistral 7B: lascia vuoto (non invia nulla). Gemma 4: imposta CLOUDFLARE_TEXT_THINKING=0
+# per disattivare il thinking ed evitare risposte lente.
+_t = os.environ.get("CLOUDFLARE_TEXT_THINKING", "").strip()
+CLOUDFLARE_TEXT_THINKING: Optional[bool] = {"0": False, "1": True}.get(_t)
+
+# Promemoria di lingua messo in CODA all'ultimo messaggio utente (e' la posizione
+# che un modello piccolo come Mistral 7B segue di piu'). Scritto nella lingua target.
+LANG_REMINDERS = {
+    "it": "Rispondi esclusivamente in italiano.",
+    "en": "Reply exclusively in English.",
+    "es": "Responde exclusivamente en español.",
+    "fr": "Réponds exclusivement en français.",
+    "de": "Antworte ausschließlich auf Deutsch.",
+    "pt": "Responda exclusivamente em português.",
+}
+
+# Riferimenti ai task in background: senza, asyncio puo' garbage-collectarli a meta' lavoro.
+_background_tasks: set = set()
+
+
+# =====================================================================================
+# CONVERSIONE MESSAGGI
+# =====================================================================================
 def _guess_image_mime(b64: str) -> str:
     head = (b64 or "")[:12]
     if head.startswith("iVBOR"):
@@ -653,13 +673,37 @@ def _guess_image_mime(b64: str) -> str:
     return "image/jpeg"
 
 
-def _to_cloudflare_messages(messages: List[dict]) -> List[dict]:
-    """Come _to_openai_messages, ma lascia passare le immagini al modello (Gemma ha la vision)."""
+def _to_openai_messages(messages: List[dict]) -> List[dict]:
+    """Per NVIDIA (modelli di codice, solo testo): immagini/PDF diventano segnaposto."""
     converted = []
     for m in messages:
         content = m["content"]
         if isinstance(content, str):
-            converted.append({"role": m["role"], "content": content})
+            converted.append({"role": m["role"], "content": content or " "})
+            continue
+        text_chunks = []
+        for part in content:
+            if part["type"] == "text":
+                text_chunks.append(part["text"])
+            elif part["type"] == "image_url":
+                text_chunks.append("[Allegato immagine ricevuto: analisi immagini temporaneamente non disponibile]")
+            elif part["type"] == "document_url":
+                text_chunks.append("[Allegato PDF ricevuto: analisi PDF temporaneamente non disponibile]")
+        converted.append({"role": m["role"], "content": "\n".join(text_chunks) or " "})
+    return converted
+
+
+def _to_cloudflare_messages(messages: List[dict], vision: bool = False) -> List[dict]:
+    """
+    Per Cloudflare Workers AI. Con vision=False (default, Mistral 7B) il contenuto
+    e' SEMPRE una stringa: Mistral non accetta parti image_url e andrebbe in errore.
+    Con vision=True (es. Gemma) le immagini passano come image_url.
+    """
+    converted = []
+    for m in messages:
+        content = m["content"]
+        if isinstance(content, str):
+            converted.append({"role": m["role"], "content": content or " "})
             continue
         parts = []
         for part in content:
@@ -667,13 +711,16 @@ def _to_cloudflare_messages(messages: List[dict]) -> List[dict]:
                 if part["text"]:
                     parts.append({"type": "text", "text": part["text"]})
             elif part["type"] == "image_url":
-                img = part["image_url"]
-                if isinstance(img, dict):
-                    img = img.get("url", "")
-                if img:
-                    parts.append({"type": "image_url", "image_url": {"url": img}})
+                if vision:
+                    img = part["image_url"]
+                    if isinstance(img, dict):
+                        img = img.get("url", "")
+                    if img:
+                        parts.append({"type": "image_url", "image_url": {"url": img}})
+                else:
+                    parts.append({"type": "text", "text": "[Allegato immagine: non analizzabile]"})
             elif part["type"] == "document_url":
-                parts.append({"type": "text", "text": "[PDF attachment could not be read]"})
+                parts.append({"type": "text", "text": "[Allegato PDF: non leggibile]"})
         if not parts:
             parts = [{"type": "text", "text": " "}]
         if all(p["type"] == "text" for p in parts):
@@ -683,7 +730,42 @@ def _to_cloudflare_messages(messages: List[dict]) -> List[dict]:
     return converted
 
 
-async def extract_pdf_text(b64_pdf: str, max_chars: int = 100000) -> str:
+def _normalize_roles(messages: List[dict]) -> List[dict]:
+    """
+    Mistral 7B Instruct pretende ruoli rigorosamente alternati user/assistant e che
+    si parta da 'user'. Qui: scarta i messaggi iniziali non-user e fonde quelli
+    consecutivi con lo stesso ruolo (solo se entrambi stringhe).
+    """
+    out: List[dict] = []
+    for m in messages:
+        if m["role"] not in ("user", "assistant"):
+            continue
+        if not out and m["role"] != "user":
+            continue
+        if out and out[-1]["role"] == m["role"] and isinstance(out[-1]["content"], str) and isinstance(m["content"], str):
+            out[-1]["content"] = f"{out[-1]['content']}\n\n{m['content']}"
+        else:
+            out.append({"role": m["role"], "content": m["content"]})
+    return out
+
+
+def _prepend_text(content, text: str):
+    if isinstance(content, str):
+        return text + content
+    return [{"type": "text", "text": text}] + list(content)
+
+
+def _append_text(content, text: str):
+    if isinstance(content, str):
+        return content + text
+    return list(content) + [{"type": "text", "text": text}]
+
+
+# =====================================================================================
+# PDF
+# =====================================================================================
+async def extract_pdf_text(b64_pdf: str, max_chars: int = PDF_MAX_CHARS) -> str:
+    """Estrazione locale, nessuna chiamata AI. PDF scansionati -> testo vuoto (limite noto)."""
     def _extract():
         reader = pypdf.PdfReader(io.BytesIO(base64.b64decode(b64_pdf)))
         parts, total = [], 0
@@ -698,7 +780,7 @@ async def extract_pdf_text(b64_pdf: str, max_chars: int = 100000) -> str:
 
 
 async def prepare_attachments(body: ChatGenerateBody) -> None:
-    """Trasforma i PDF dell'ultimo messaggio utente in allegati di testo (kind='file')."""
+    """Fallback: PDF dell'ultimo messaggio ancora non convertiti in allegati di testo."""
     last_user = next((m for m in reversed(body.messages) if m.role == "user"), None)
     if not last_user:
         return
@@ -710,31 +792,33 @@ async def prepare_attachments(body: ChatGenerateBody) -> None:
                 logger.warning(f"Lettura PDF '{att.name}' fallita: {e}")
                 text = ""
             att.kind = "file"
-            att.text = text if text.strip() else "(no selectable text found - the PDF may be scanned)"
+            att.text = text if text.strip() else "(nessun testo selezionabile trovato - il PDF potrebbe essere scansionato)"
             att.b64 = ""
-async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7, max_tokens: int = 1024,
-                                  url: str = None, token: str = None, thinking: bool = False):
-    """
-    Streamma la risposta testuale da Cloudflare Workers AI (SSE).
-    `messages` nel formato OpenAI-style: [{"role": "user", "content": "..."}]
-    Yielda chunk di testo man mano che arrivano.
 
-    enable_thinking=False: disattiva il thinking mode di Gemma 4 (attivo di
-    default) - senza risposte normali "spendono" comunque decine/centinaia
-    di token in reasoning_content prima del content vero, rallentando tutto.
+
+# =====================================================================================
+# CLOUDFLARE WORKERS AI - TESTO
+# =====================================================================================
+async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7, max_tokens: int = 1024,
+                                 url: str = None, token: str = None, thinking: Optional[bool] = None):
+    """
+    Streamma la risposta da Cloudflare Workers AI (SSE).
+    - `token` ora viene davvero usato (prima era ignorato e andava sempre il token testo).
+    - `thinking`: None = non invia nulla (giusto per Mistral 7B, che non conosce
+      chat_template_kwargs); True/False = invia enable_thinking (solo per Gemma).
     """
     headers = {
-        "Authorization": f"Bearer {CLOUDFLARE_TEXT_API_TOKEN}",
+        "Authorization": f"Bearer {token or CLOUDFLARE_TEXT_API_TOKEN}",
         "Content-Type": "application/json",
     }
-    
     payload = {
         "messages": messages,
         "stream": True,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "chat_template_kwargs": {"enable_thinking": thinking},
     }
+    if thinking is not None:
+        payload["chat_template_kwargs"] = {"enable_thinking": thinking}
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None)) as client:
         async with client.stream("POST", url or CLOUDFLARE_TEXT_URL, headers=headers, json=payload) as response:
@@ -747,36 +831,40 @@ async def stream_cloudflare_text(messages: list[dict], temperature: float = 0.7,
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data: "):
                     continue
-
                 data_str = line[len("data: "):].strip()
                 if data_str == "[DONE]":
                     break
-
                 try:
                     data = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
 
-                # Con enable_thinking=False non dovrebbe piu' comparire
-                # "reasoning_content" nei delta, ma per sicurezza lo scartiamo
-                # comunque se presente, cosi' non finisce mai nel testo mostrato.
-                choices = data.get("choices") or [{}]
+                # Supporta sia il formato OpenAI (choices/delta) sia quello nativo (response).
+                # "reasoning_content" viene scartato: non deve mai finire nel testo mostrato.
+                choices = data.get("choices") or []
                 delta = choices[0].get("delta", {}) if choices else {}
-                chunk = delta.get("content") or data.get("response", "")
+                chunk = delta.get("content") or data.get("response") or ""
                 if chunk:
                     yield chunk
+
+
 async def call_cloudflare_text(messages: List[dict], temperature: float = CLOUDFLARE_TEXT_TEMPERATURE,
-                                max_tokens: int = CLOUDFLARE_TEXT_MAX_TOKENS) -> str:
-    """
-    Wrapper non-streaming: consuma stream_cloudflare_text e accumula tutto il
-    testo in un'unica stringa (stesso pattern di call_nvidia rispetto a
-    call_nvidia_stream), cosi' si integra nel job store esistente.
-    """
-    openai_messages = _to_cloudflare_messages(messages)
+                               max_tokens: int = CLOUDFLARE_TEXT_MAX_TOKENS) -> str:
+    """Wrapper non-streaming: accumula tutto il testo (serve al job store)."""
+    cf_messages = _normalize_roles(_to_cloudflare_messages(messages, vision=CLOUDFLARE_TEXT_VISION))
     chunks = []
-    async for piece in stream_cloudflare_text(openai_messages, temperature=temperature, max_tokens=max_tokens):
+    async for piece in stream_cloudflare_text(cf_messages, temperature=temperature, max_tokens=max_tokens,
+                                              thinking=CLOUDFLARE_TEXT_THINKING):
         chunks.append(piece)
-    return "".join(chunks)
+    text = "".join(chunks).strip()
+    if not text:
+        raise RuntimeError("Cloudflare Workers AI ha restituito una risposta vuota")
+    return text
+
+
+# =====================================================================================
+# NVIDIA NIM - CODICE
+# =====================================================================================
 if not NVIDIA_API_KEY:
     logger.error("⚠️  NVIDIA_API_KEY NON CONFIGURATA — nessuna richiesta di codice funzionera'.")
 else:
@@ -825,10 +913,8 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
                              max_tokens: int = 16384, thinking: bool = False):
     """
-    Parla con NVIDIA in stream=True - NON opzionale: il loro gateway ha un tetto
-    interno di ~300s (5 minuti) sulle richieste non-streaming. Con stream=True i
-    byte continuano ad arrivare e la connessione non scade, anche per generazioni
-    di 20+ minuti. Async generator: yield di ogni pezzo visibile.
+    Stream verso NVIDIA (obbligatorio: il gateway chiude le richieste non-stream
+    dopo ~300s). Async generator che emette solo il testo visibile.
     """
     client = _get_nvidia_client()
     openai_messages = _to_openai_messages(messages)
@@ -842,37 +928,36 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
         first_token_at = None
 
         extra_body = _extra_body_for_model(model, thinking)
-        per_request_timeout = _timeout_for_model(model)
         create_kwargs = dict(
             model=model, messages=openai_messages, temperature=temperature, top_p=0.95,
-            max_tokens=max_tokens, stream=True, timeout=per_request_timeout,
+            max_tokens=max_tokens, stream=True, timeout=_timeout_for_model(model),
         )
         if extra_body:
             create_kwargs["extra_body"] = extra_body
 
-        logger.info(f"NVIDIA NIM: chiamata a '{model}' - max_tokens={max_tokens}, thinking={thinking}, stream=True (necessario per evitare il 504 NVIDIA su richieste >5min)")
+        logger.info(f"NVIDIA NIM: chiamata a '{model}' - max_tokens={max_tokens}, thinking={thinking}, stream=True")
         response = await client.chat.completions.create(**create_kwargs)
-        logger.info(f"NVIDIA NIM: risposta HTTP ricevuta da '{model}' dopo {time.monotonic() - started:.1f}s, inizio lettura stream")
+        logger.info(f"NVIDIA NIM: risposta HTTP da '{model}' dopo {time.monotonic() - started:.1f}s")
 
         async for chunk in response:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
-            reasoning = getattr(delta, "reasoning_content", None)
+            reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if reasoning:
                 reasoning_chars += len(reasoning)
                 continue
             if delta.content:
                 if first_token_at is None:
                     first_token_at = time.monotonic() - started
-                    logger.info(f"NVIDIA NIM: primo token visibile da '{model}' dopo {first_token_at:.1f}s (reasoning finora: {reasoning_chars} caratteri)")
+                    logger.info(f"NVIDIA NIM: primo token da '{model}' dopo {first_token_at:.1f}s (reasoning: {reasoning_chars} car.)")
                 content_chars += len(delta.content)
                 yield delta.content
 
         elapsed = time.monotonic() - started
         if content_chars == 0 and reasoning_chars > 0:
-            logger.warning(f"NVIDIA NIM: '{model}' ha esaurito max_tokens={max_tokens} tutto in reasoning ({reasoning_chars} caratteri) - ZERO output visibile.")
-        logger.info(f"NVIDIA NIM: stream NVIDIA completato per '{model}' in {elapsed:.1f}s ({content_chars} caratteri visibili, {reasoning_chars} di reasoning)")
+            logger.warning(f"NVIDIA NIM: '{model}' ha esaurito max_tokens={max_tokens} in reasoning ({reasoning_chars} car.) - ZERO output visibile.")
+        logger.info(f"NVIDIA NIM: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} car. visibili, {reasoning_chars} reasoning)")
 
 
 def _is_max_tokens_error(exc: Exception) -> bool:
@@ -882,23 +967,23 @@ def _is_max_tokens_error(exc: Exception) -> bool:
 
 async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7,
                       max_tokens: int = 16384, thinking: bool = False, max_retries: int = 3) -> str:
-    """
-    Wrapper: consuma call_nvidia_stream (streaming verso NVIDIA, obbligatorio) e
-    accumula tutto il testo, restituendolo come blocco unico quando e' completo.
-    """
+    """Wrapper: consuma call_nvidia_stream e restituisce il testo completo, con retry."""
     if not NVIDIA_API_KEY:
-        logger.error(f"NVIDIA NIM: richiesta bloccata PRIMA dell'invio - chiave assente (model={model})")
+        logger.error(f"NVIDIA NIM: richiesta bloccata - chiave assente (model={model})")
         raise RuntimeError("NVIDIA_API_KEY non configurata")
 
     current_max_tokens = max_tokens
     last_exc: Optional[Exception] = None
     for attempt in range(max_retries):
-        logger.info(f"NVIDIA NIM: invio richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, thinking={thinking}, max_tokens={current_max_tokens})")
+        logger.info(f"NVIDIA NIM: richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, thinking={thinking}, max_tokens={current_max_tokens})")
         try:
             chunks = []
             async for piece in call_nvidia_stream(messages, model, temperature, current_max_tokens, thinking):
                 chunks.append(piece)
-            return "".join(chunks)
+            text = "".join(chunks)
+            if not text.strip():
+                raise RuntimeError(f"NVIDIA NIM '{model}' ha restituito una risposta vuota")
+            return text
         except openai.AuthenticationError as e:
             logger.error(f"NVIDIA NIM: 401 - chiave sbagliata o revocata (model={model}): {e}")
             raise RuntimeError(f"NVIDIA API key non valida o revocata: {e}") from e
@@ -922,14 +1007,14 @@ async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             last_exc = e
             if attempt < max_retries - 1:
-                logger.warning(f"NVIDIA NIM: connessione/timeout (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"NVIDIA NIM: connessione/timeout (model={model}), riprovo: {e}")
                 await asyncio.sleep(2)
                 continue
             break
         except openai.InternalServerError as e:
             last_exc = e
             if attempt < max_retries - 1:
-                logger.warning(f"NVIDIA NIM: errore server 5xx (model={model}), riprovo (tentativo {attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"NVIDIA NIM: errore 5xx (model={model}), riprovo: {e}")
                 await asyncio.sleep(3)
                 continue
             break
@@ -937,16 +1022,18 @@ async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7
             logger.error(f"NVIDIA NIM: errore {e.status_code} (model={model}): {e.message}")
             last_exc = e
             break
+        except RuntimeError as e:
+            # risposta vuota: ritenta
+            last_exc = e
+            if attempt < max_retries - 1:
+                continue
+            break
 
     raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
 async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) -> tuple:
-    """
-    Prova prima NVIDIA_CODE_MODEL (GLM 5.3). Se fallisce del tutto (dopo tutti
-    i retry interni di call_nvidia), ritenta su NVIDIA_CODE_MODEL_FALLBACK.
-    Restituisce (content, model_effettivamente_usato).
-    """
+    """Prova NVIDIA_CODE_MODEL; se fallisce del tutto, ritenta su NVIDIA_CODE_MODEL_FALLBACK."""
     try:
         content = await call_nvidia(
             messages, model=NVIDIA_CODE_MODEL, temperature=1.0,
@@ -955,7 +1042,7 @@ async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) 
         return content, NVIDIA_CODE_MODEL
     except Exception as primary_exc:
         logger.warning(
-            f"NVIDIA NIM: modello primario '{NVIDIA_CODE_MODEL}' fallito del tutto dopo tutti i retry, "
+            f"NVIDIA NIM: modello primario '{NVIDIA_CODE_MODEL}' fallito, "
             f"passo al fallback '{NVIDIA_CODE_MODEL_FALLBACK}': {primary_exc}"
         )
         content = await call_nvidia(
@@ -965,15 +1052,13 @@ async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) 
         return content, NVIDIA_CODE_MODEL_FALLBACK
 
 
-
+# =====================================================================================
+# IMMAGINI: moderazione + Flux
+# =====================================================================================
 async def is_unsafe_image_prompt(prompt: str) -> bool:
     """
-    Filtro di sicurezza sui prompt di generazione immagini (Flux non ha un
-    filtro affidabile lato Cloudflare). Classificazione via Gemma, stesso
-    pattern di is_code_request - nessuna lista di parole.
-    Fail-safe: se la classificazione fallisce, il default è BLOCCARE - per un
-    filtro di sicurezza un falso negativo (contenuto vietato che passa) è
-    molto peggio di un falso positivo (richiesta innocua rifiutata per errore).
+    Filtro di sicurezza sui prompt immagine, via Gemma. Fail-safe: se la
+    classificazione fallisce, BLOCCA (meglio un falso positivo che un falso negativo).
     """
     if not prompt or not prompt.strip():
         return False
@@ -994,16 +1079,18 @@ async def is_unsafe_image_prompt(prompt: str) -> bool:
     ]
     try:
         chunks = []
-        async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5,
-                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_CLASSIFY_API_TOKEN):
+        async for piece in stream_cloudflare_text(
+            classify_messages, temperature=0.0, max_tokens=5,
+            url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_CLASSIFY_API_TOKEN, thinking=False,
+        ):
             chunks.append(piece)
-            
         answer = "".join(chunks).strip().lower()
         logger.info(f"Moderazione immagine — prompt: '{prompt[:80]}' → risposta classificatore: '{answer}'")
         return not answer.startswith("false")
     except Exception as e:
         logger.warning(f"Moderazione immagine fallita, blocco per sicurezza: {e}")
         return True
+
 
 async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_retries: int = 3):
     """Flux 1 [schnell] sull'account IMMAGINI. Restituisce (bytes, content_type)."""
@@ -1012,7 +1099,7 @@ async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_ret
     url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_IMAGE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
     headers = {"Authorization": f"Bearer {CLOUDFLARE_IMAGE_API_TOKEN}", "Content-Type": "application/json"}
     payload = {
-        "prompt": prompt[:2048],  # limite del modello
+        "prompt": prompt[:2048],
         "steps": CLOUDFLARE_IMAGE_STEPS,
         "seed": random.randint(1, 999999999),
     }
@@ -1039,41 +1126,31 @@ async def call_cloudflare_flux_image(prompt: str, timeout: float = 90.0, max_ret
             last_exc = e
             break
     raise RuntimeError(f"Cloudflare Workers AI (Flux, immagini) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
-async def extract_pdf_text(b64_pdf: str, max_chars: int = 15000) -> str:
-    """
-    Estrae il testo da un PDF in locale - nessuna chiamata AI, nessun costo,
-    nessun tocco a NVIDIA/Cloudflare. Se il PDF è scansionato (senza testo
-    selezionabile) il risultato può essere vuoto: limite noto, si può
-    aggiungere OCR in futuro se serve.
-    """
-    def _extract():
-        pdf_bytes = base64.b64decode(b64_pdf)
-        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
-        text_parts = [page.extract_text() or "" for page in reader.pages]
-        return "\n\n".join(text_parts)[:max_chars]
-    return await asyncio.to_thread(_extract)
 
 
+# =====================================================================================
+# ALLEGATI: vision per le immagini, estrazione locale per i PDF
+# =====================================================================================
 async def describe_image_with_vision(b64_image: str, timeout: float = 45.0) -> str:
     """
-    Descrive un'immagine con Llama 3.2 11B Vision su Cloudflare Workers AI
-    (stesso account/token già usato per Flux - immagini). Funzione nuova e
-    isolata: non tocca call_nvidia*, stream_cloudflare_text né call_cloudflare_flux_image.
-    NB: al primo utilizzo va accettata UNA VOLTA la licenza Meta con:
-    curl https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/ai/run/@cf/meta/llama-3.2-11b-vision-instruct \
-      -H "Authorization: Bearer $TOKEN" -d '{"prompt": "agree"}'
-    (va fatta a mano una volta sola, non nel codice dell'app).
+    Descrive un'immagine con Llama 3.2 11B Vision su Cloudflare Workers AI.
+    NB: al primo utilizzo va accettata UNA VOLTA la licenza Meta (prompt "agree"
+    sull'endpoint del modello) - a mano, non nel codice dell'app.
     """
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         raise RuntimeError("CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN non configurate")
     url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_VISION_MODEL}"
     headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}", "Content-Type": "application/json"}
+    mime = _guess_image_mime(b64_image)  # prima era sempre image/jpeg
     payload = {
         "messages": [
             {"role": "system", "content": "You are an assistant that describes images accurately and in detail, including any visible text."},
-            {"role": "user", "content": "Describe this image in detail."},
+            {"role": "user", "content": [
+                {"type": "text", "text": "Describe this image in detail."},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_image}"}},
+            ]},
         ],
-        "image": f"data:image/jpeg;base64,{b64_image}",
+        "max_tokens": 800,
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(url, json=payload, headers=headers)
@@ -1088,31 +1165,37 @@ async def describe_image_with_vision(b64_image: str, timeout: float = 45.0) -> s
 
 async def enrich_attachments_with_ai_analysis(body: ChatGenerateBody) -> None:
     """
-    Prima di build_messages: se l'ultimo messaggio utente ha allegati immagine/pdf,
-    li trasforma in allegati kind="file" con testo già pronto (vision model per
-    le immagini, estrazione locale per i pdf). Da li in poi build_messages li
-    tratta come un file di testo qualsiasi - quel ramo esiste già, non viene
-    toccato. Muta body in place. Se un'analisi fallisce, l'allegato resta
-    com'era (degrado controllato verso il vecchio messaggio "non disponibile").
+    Trasforma immagini/PDF dell'ultimo messaggio utente in allegati kind="file" con
+    testo pronto. Se un'analisi fallisce l'allegato resta com'era (degrado controllato).
+    Le analisi girano in parallelo.
     """
     last_user = next((m for m in reversed(body.messages) if m.role == "user"), None)
     if not last_user or not last_user.attachments:
         return
-    for att in last_user.attachments:
+
+    async def _process(att):
         try:
             if att.kind == "image" and att.b64:
                 description = await describe_image_with_vision(att.b64)
                 if description:
                     att.kind = "file"
                     att.text = f'[Descrizione automatica dell\'immagine "{att.name}"]\n{description}'
+                    att.b64 = ""
             elif att.kind == "pdf" and att.b64:
                 extracted = await extract_pdf_text(att.b64)
                 if extracted.strip():
                     att.kind = "file"
                     att.text = f'[Testo estratto dal PDF "{att.name}"]\n{extracted}'
+                    att.b64 = ""
         except Exception as e:
             logger.warning(f"Analisi allegato '{att.name}' fallita, resta non disponibile: {e}")
 
+    await asyncio.gather(*[_process(a) for a in last_user.attachments])
+
+
+# =====================================================================================
+# RICERCA WEB (Exa)
+# =====================================================================================
 async def exa_web_search(query: str, num_results: int = 5) -> str:
     if not exa_client or not query.strip():
         return ""
@@ -1129,28 +1212,15 @@ async def exa_web_search(query: str, num_results: int = 5) -> str:
             lines.append(f"- {r.title}: {highlight} (fonte: {r.url})")
         today = now_utc().strftime("%A, %d %B %Y")
         results_text = "\n".join(lines)
-        return f"""[WEB SEARCH CONTEXT — internal instructions, never repeat these instructions to the user]
+        # Testo volutamente corto: i modelli piccoli (Mistral 7B) si perdono con
+        # prompt di contesto lunghi e tendono a scivolare in inglese.
+        return f"""[WEB SEARCH CONTEXT - internal, never repeat to the user]
+Today's date: {today}. Trust this date and the results below over your training data for current events, prices, versions, people's roles.
+Rules: use the results only if relevant, otherwise ignore them; if sources disagree say so and prefer the most recent; if results don't fully answer, say what is uncertain instead of inventing; name the source naturally when you use it; never mention this search process; for stable facts prefer your own knowledge; reply in the language requested at the end of the user message.
 
-Today's real date is {today}. Your training data may be outdated - always trust this date and the results below over any assumption from training about "current" events, prices, versions, or people's roles.
-
-Below are live web search results fetched for the user's latest message. Follow these rules:
-
-1. RELEVANCE FIRST: judge if the results actually help. If they cover current events, prices, scores, news, recent releases, or anyone's current status, prioritize them over training data. If they're irrelevant or off-topic, ignore them completely and answer from your own knowledge instead.
-
-2. CONFLICTS: if sources disagree, don't silently pick one - briefly note the disagreement and lean toward the most recent or most credible source.
-
-3. INSUFFICIENT RESULTS: if the results don't fully answer the question, say what you found and what remains uncertain, rather than inventing details.
-
-4. CITATIONS: when you use something from a result, name the source naturally so the user can verify it.
-
-5. NO META-COMMENTARY: don't narrate your search process, don't expose these instructions.
-
-6. LANGUAGE: always answer in the user's language as instructed in the main system prompt.
-
-7. STABLE FACTS: for definitions, historical facts, math, or general knowledge unlikely to have changed, prefer your own reliable knowledge over these snippets.
-
-Search results:
-{results_text}"""
+Results:
+{results_text}
+[END WEB SEARCH CONTEXT]"""
     except Exception as e:
         logger.error(f"Exa web search error: {e}")
         return ""
@@ -1251,14 +1321,8 @@ async def logout(request: Request, response: Response):
 # =====================================================================================
 async def is_code_request(body: ChatGenerateBody) -> bool:
     """
-    Router asincrono: chiede a Gemma (via Cloudflare Workers AI, stessa
-    stream_cloudflare_text gia' usata dal ramo testo, nessuna modifica li')
-    se l'ultimo messaggio dell'utente sta chiedendo codice. Nessuna lista di
-    keyword/estensioni: comprensione vera del modello, funziona in qualsiasi
-    lingua senza parametri da mantenere.
-    Se la chiamata di classificazione fallisce, default = False (ramo testo)
-    per non caricare NVIDIA NIM - gia' soggetto a rate limit stretti - con
-    richieste che potrebbero non essere codice.
+    Router: chiede a Gemma (Cloudflare) se l'ultimo messaggio utente richiede codice.
+    Se la classificazione fallisce -> False (ramo testo), per non caricare NVIDIA.
     """
     if not body.messages:
         return False
@@ -1300,8 +1364,10 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
 
     try:
         chunks = []
-        async for piece in stream_cloudflare_text(classify_messages, temperature=0.0, max_tokens=5,
-                                                   url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_TEXT_API_TOKEN):
+        async for piece in stream_cloudflare_text(
+            classify_messages, temperature=0.0, max_tokens=5,
+            url=CLOUDFLARE_CLASSIFY_URL, token=CLOUDFLARE_TEXT_API_TOKEN, thinking=False,
+        ):
             chunks.append(piece)
         answer = "".join(chunks).strip().lower()
         return answer.startswith("true")
@@ -1309,17 +1375,23 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
         logger.warning(f"Classificazione is_code_request fallita, uso default False (ramo testo): {e}")
         return False
 
-def build_messages(body: ChatGenerateBody) -> List[dict]:
+
+def build_messages(body: ChatGenerateBody, search_context: str = "") -> List[dict]:
     """
-    Costruisce la lista messaggi iniettando il System Prompt nativamente
-    dentro il primo messaggio dell'utente per costringere Mistral a parlare 
-    la lingua corretta.
+    Costruisce la lista messaggi. Fix lingua (Mistral 7B rispondeva sempre in inglese):
+      1. le istruzioni vanno nel PRIMO messaggio *user* reale (prima, se la cronologia
+         troncata iniziava con un 'assistant', non venivano iniettate affatto);
+      2. un promemoria di lingua, scritto nella lingua target, va in CODA all'ultimo
+         messaggio utente: i modelli piccoli danno peso soprattutto agli ultimi token;
+      3. il contesto di ricerca web NON e' piu' un messaggio 'system' inserito a
+         posizione 1 (rompeva l'alternanza user/assistant richiesta da Mistral e non
+         veniva letto): ora e' dentro l'ultimo messaggio utente.
     """
     lang_name = LANG_NAMES.get(body.language, "English")
-    messages = []
+    reminder = LANG_REMINDERS.get(body.language, f"Reply exclusively in {lang_name}.")
+    messages: List[dict] = []
 
-    trimmed_messages = body.messages[-MAX_HISTORY_MESSAGES:]
-    for m in trimmed_messages:
+    for m in body.messages[-MAX_HISTORY_MESSAGES:]:
         parts = []
         if m.content:
             parts.append({"type": "text", "text": m.content})
@@ -1331,34 +1403,45 @@ def build_messages(body: ChatGenerateBody) -> List[dict]:
             elif att.kind == "file" and att.text:
                 parts.append({"type": "text", "text": f"\n\n[Allegato: {att.name}]\n```\n{att.text}\n```"})
         if not parts:
-            parts = [{"type": "text", "text": ""}]
+            parts = [{"type": "text", "text": " "}]
         if len(parts) == 1 and parts[0]["type"] == "text":
             messages.append({"role": m.role, "content": parts[0]["text"]})
         else:
             messages.append({"role": m.role, "content": parts})
 
-    # TRUCCO DEFINITIVO PER MISTRAL: Iniezione del prompt nel primo messaggio user
+    # Si parte sempre da un messaggio 'user'
+    first_user = next((i for i, m in enumerate(messages) if m["role"] == "user"), None)
+    if first_user is None:
+        return messages
+    messages = messages[first_user:]
+    last_user = max(i for i, m in enumerate(messages) if m["role"] == "user")
+
+    # Ultimo messaggio utente: contesto web in testa, promemoria lingua in coda
+    if search_context:
+        messages[last_user]["content"] = _prepend_text(
+            messages[last_user]["content"], f"{search_context}\n\n[User message]: "
+        )
+    messages[last_user]["content"] = _append_text(
+        messages[last_user]["content"], f"\n\n[{reminder}]"
+    )
+
+    # Primo messaggio utente: istruzioni di sistema
     sys_content = SYSTEM_PROMPT.format(lang=lang_name)
-    if messages and messages[0]["role"] == "user":
-        if isinstance(messages[0]["content"], str):
-            messages[0]["content"] = f"Instructions: {sys_content}\n\n[User Request]: {messages[0]['content']}"
-        elif isinstance(messages[0]["content"], list):
-            messages[0]["content"].insert(0, {"type": "text", "text": f"Instructions: {sys_content}\n\n[User Request]: "})
+    messages[0]["content"] = _prepend_text(
+        messages[0]["content"], f"[Instructions]\n{sys_content}\n[End instructions]\n\n"
+    )
 
     return messages
 
+
 # =====================================================================================
-# JOB STORE PER GENERAZIONE ASINCRONA — evita di tenere aperta una singola richiesta
-# HTTP per tutta la durata della generazione (rischio di 504 lato proxy/browser
-# indipendente dai 504 che puo' restituire NVIDIA stessa). Il client fa POST
-# /ai/generate/start (risposta immediata con job_id) e poi polling su
-# /ai/generate/status/{job_id} ogni paio di secondi finche' non e' "done"/"error".
-# In-memory: va bene perche' il servizio gira con un solo worker uvicorn
-# (uvicorn server:app, nessun --workers > 1); se in futuro si passa a piu'
-# worker/processi bisognera' spostare questo store su Redis o Supabase.
+# JOB STORE PER GENERAZIONE ASINCRONA
+# POST /ai/generate/start -> job_id subito; il client fa polling su
+# GET /ai/generate/status/{job_id}. In-memory: va bene con UN solo worker uvicorn;
+# con piu' worker servira' Redis/Supabase.
 # =====================================================================================
 _ai_jobs: dict = {}
-_AI_JOB_TTL_SECONDS = 3 * 60 * 60  # 3 ore  # 30 minuti, poi il job viene scartato dalla cache
+_AI_JOB_TTL_SECONDS = 3 * 60 * 60  # 3 ore
 
 
 def _cleanup_ai_jobs():
@@ -1377,8 +1460,11 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
             provider_label = "cloudflare_workers_ai"
 
         used = await get_usage_today(user.user_id)
+        job = _ai_jobs.get(job_id)
+        if job is None:  # job scaduto/ripulito nel frattempo
+            return
         _ai_jobs[job_id] = {
-            **_ai_jobs[job_id],
+            **job,
             "status": "done",
             "content": content,
             "provider": provider_label,
@@ -1387,38 +1473,38 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
         }
     except Exception as e:
         logger.error(f"AI job error (job {job_id}): {e}")
-        _ai_jobs[job_id] = {
-            **_ai_jobs[job_id],
-            "status": "error",
-            "error": "Error generating with Zalvion AI",
-        }
+        job = _ai_jobs.get(job_id)
+        if job is not None:
+            _ai_jobs[job_id] = {**job, "status": "error", "error": "Error generating with Zalvion AI"}
+
 
 @api_router.post("/ai/generate/start")
 async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_current_user)):
-    """
-    Avvia la generazione in background e risponde SUBITO con un job_id. Il
-    client chiama poi GET /ai/generate/status/{job_id} in polling. Per il
-    codice, la generazione vera e propria include gia' il fallback automatico
-    Kimi K3 -> DeepSeek V4 Pro (vedi call_nvidia_code_with_fallback).
-    """
+    """Avvia la generazione in background e risponde SUBITO con un job_id."""
     _cleanup_ai_jobs()
+
+    # Allegati prima di tutto (servono sia al router sia a build_messages)
     await enrich_attachments_with_ai_analysis(body)
     await prepare_attachments(body)
-    messages = build_messages(body)
 
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
-    search_context = await exa_web_search(last_user_text)
-    if search_context:
-        messages.insert(1, {"role": "system", "content": search_context})
 
-    is_code = await is_code_request(body)
+    # Ricerca web e classificazione codice in parallelo (prima erano in serie)
+    search_context, is_code = await asyncio.gather(
+        exa_web_search(last_user_text),
+        is_code_request(body),
+    )
+
+    messages = build_messages(body, search_context)
 
     job_id = uuid.uuid4().hex
     _ai_jobs[job_id] = {
         "status": "pending", "content": None, "error": None,
         "created_at": time.monotonic(), "user_id": user.user_id,
     }
-    asyncio.create_task(_run_ai_job(job_id, messages, is_code, user))
+    task = asyncio.create_task(_run_ai_job(job_id, messages, is_code, user))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"job_id": job_id, "status": "pending"}
 
 
@@ -1439,16 +1525,6 @@ async def ai_generate_status(job_id: str, user: User = Depends(get_current_user)
     elif job["status"] == "error":
         response["error"] = job["error"]
     return response
-
-    async def event_generator():
-        try:
-            async for chunk in stream_cloudflare_text(messages, temperature, max_tokens):
-                yield f"data: {json.dumps({'content': chunk})}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
 # --- Router: decide quale provider usare PRIMA di generare ---
 # Riusa la tua is_code_request(text) già esistente per CODE_KEYWORDS,
 # non la ridefinisco qui.
