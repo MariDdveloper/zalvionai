@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
 from typing import List, Optional
+from collections import deque
 import edge_tts
 import io
 import httpx
@@ -1182,7 +1183,7 @@ async def describe_image_with_vision(b64_image: str, timeout: float = 45.0) -> s
     return str(result)
 
 
-async def enrich_attachments_with_ai_analysis(body: ChatGenerateBody) -> None:
+async def enrich_attachments_with_ai_analysis(body: ChatGenerateBody, skip_images: bool = False) -> None:
     """
     Trasforma immagini/PDF dell'ultimo messaggio utente in allegati kind="file" con
     testo pronto. Se un'analisi fallisce l'allegato resta com'era (degrado controllato).
@@ -1194,7 +1195,7 @@ async def enrich_attachments_with_ai_analysis(body: ChatGenerateBody) -> None:
 
     async def _process(att):
         try:
-            if att.kind == "image" and att.b64:
+            if att.kind == "image" and att.b64 and not skip_images:
                 description = await describe_image_with_vision(att.b64)
                 if description:
                     att.kind = "file"
@@ -1461,13 +1462,260 @@ def _cleanup_ai_jobs():
         _ai_jobs.pop(jid, None)
 
 
-async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: User):
+# =====================================================================================
+# ZALVION AI - FALLBACK/VISION SU GEMMA 4 26B (Google AI Studio / Gemini API)
+#
+# Usato in 2 casi (e solo in questi):
+#   1) l'ultimo messaggio utente contiene immagini (e non e' una richiesta di codice)
+#   2) Cloudflare risponde con rate limit / quota finita (429, errore 4006)
+#
+# Nessuna nuova dipendenza: usa httpx (gia' nel progetto).
+# Il codice Cloudflare/NVIDIA esistente NON viene toccato, tranne:
+#   - enrich_attachments_with_ai_analysis: +1 parametro opzionale (vedi PASSO 3)
+#   - _run_ai_job e ai_generate_start: sostituite con le versioni qui sotto
+#
+# VARIABILI D'AMBIENTE (Render):
+#   GEMINI_API_KEY      chiave di Google AI Studio (se assente, tutto resta com'e' ora)
+#   GEMINI_MODEL        opzionale, default gemma-4-26b-a4b-it
+#   GEMINI_RPM          opzionale, default 14  (limite reale 15, 1 di margine)
+#   GEMINI_RPD          opzionale, default 1450 (limite reale 1500, margine)
+#   GEMINI_MAX_TOKENS   opzionale, default 2048
+# =====================================================================================
+
+# ---- PASSO 1: aggiungi questi import in cima a server.py (se mancano) ---------------
+# from collections import deque
+# -------------------------------------------------------------------------------------
+
+# ---- PASSO 2: incolla da qui in giu', DOPO call_cloudflare_text / describe_image_with_vision
+#               e PRIMA di _run_ai_job (sostituendo _run_ai_job e ai_generate_start) ----
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemma-4-26b-a4b-it").strip()
+GEMINI_RPM = int(os.environ.get("GEMINI_RPM", "14"))
+GEMINI_RPD = int(os.environ.get("GEMINI_RPD", "1450"))
+GEMINI_MAX_TOKENS = int(os.environ.get("GEMINI_MAX_TOKENS", "2048"))
+GEMINI_ENABLED = bool(GEMINI_API_KEY)
+
+if GEMINI_ENABLED:
+    logger.info(f"Gemini API attiva: modello '{GEMINI_MODEL}', limiti locali {GEMINI_RPM} rpm / {GEMINI_RPD} rpd")
+else:
+    logger.warning("GEMINI_API_KEY non configurata: nessun supporto immagini via Gemini, nessun fallback sul 429 di Cloudflare.")
+
+
+class _GeminiLimiter:
+    """
+    Rispetta in locale i limiti del piano gratuito (15 richieste/minuto, 1500/giorno)
+    cosi' non arrivano nemmeno i 429 da Google. In-memory: valido con un solo worker
+    uvicorn (come il job store). Il giorno di Google riparte a mezzanotte Pacific:
+    qui si approssima con UTC-8 fisso (il margine su GEMINI_RPD copre l'ora di scarto).
+    """
+    def __init__(self, rpm: int, rpd: int):
+        self.rpm = rpm
+        self.rpd = rpd
+        self._window = deque()
+        self._day = None
+        self._day_count = 0
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _today() -> str:
+        return (datetime.now(timezone.utc) + timedelta(hours=-8)).strftime("%Y-%m-%d")
+
+    async def acquire(self, max_wait: float = 20.0) -> None:
+        waited = 0.0
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                today = self._today()
+                if today != self._day:
+                    self._day, self._day_count = today, 0
+                if self._day_count >= self.rpd:
+                    raise RuntimeError("Quota giornaliera Gemini esaurita")
+                while self._window and now - self._window[0] >= 60.0:
+                    self._window.popleft()
+                if len(self._window) < self.rpm:
+                    self._window.append(now)
+                    self._day_count += 1
+                    return
+                wait = 60.0 - (now - self._window[0]) + 0.05
+            if waited + wait > max_wait:
+                raise RuntimeError("Limite al minuto Gemini raggiunto")
+            await asyncio.sleep(wait)
+            waited += wait
+
+
+_gemini_limiter = _GeminiLimiter(GEMINI_RPM, GEMINI_RPD)
+
+
+def _parse_data_uri(url) -> Optional[tuple]:
+    """'data:image/png;base64,XXXX' -> ('image/png', 'XXXX'); altrimenti None."""
+    if isinstance(url, dict):
+        url = url.get("url", "")
+    if not isinstance(url, str) or not url.startswith("data:") or ";base64," not in url:
+        return None
+    head, data = url.split(";base64,", 1)
+    return (head[5:] or "image/jpeg"), data
+
+
+def _to_gemini_contents(messages: List[dict]) -> List[dict]:
+    """
+    Converte i messaggi interni nel formato Gemini (contents/parts).
+    - ruolo 'assistant' -> 'model'
+    - le immagini viaggiano come inline_data SOLO nell'ultimo messaggio utente
+      (quelle della cronologia diventano un segnaposto: risparmia banda e quota)
+    - nessun system_instruction: il priming user/assistant di build_messages basta
+      ed e' compatibile con qualsiasi modello Gemma
+    """
+    msgs = _normalize_roles(messages)
+    if not msgs:
+        raise RuntimeError("Nessun messaggio da inviare a Gemini")
+    last_user = max((i for i, m in enumerate(msgs) if m["role"] == "user"), default=len(msgs) - 1)
+
+    contents = []
+    for i, m in enumerate(msgs):
+        role = "user" if m["role"] == "user" else "model"
+        content = m["content"]
+        parts = []
+        if isinstance(content, str):
+            if content.strip():
+                parts.append({"text": content})
+        else:
+            for p in content:
+                if p["type"] == "text":
+                    if p.get("text") and p["text"].strip():
+                        parts.append({"text": p["text"]})
+                elif p["type"] == "image_url":
+                    parsed = _parse_data_uri(p.get("image_url"))
+                    if parsed and i == last_user:
+                        parts.append({"inline_data": {"mime_type": parsed[0], "data": parsed[1]}})
+                    else:
+                        parts.append({"text": "[immagine inviata in precedenza]"})
+                elif p["type"] == "document_url":
+                    parts.append({"text": "[Allegato PDF: non leggibile]"})
+        if not parts:
+            parts = [{"text": " "}]
+        contents.append({"role": role, "parts": parts})
+    return contents
+
+
+async def call_gemini_text(messages: List[dict], temperature: float = None,
+                           max_tokens: int = None, max_retries: int = 2) -> str:
+    """Chiama Gemma su Gemini API (non-streaming, il job store fa gia' da buffer)."""
+    if not GEMINI_ENABLED:
+        raise RuntimeError("GEMINI_API_KEY non configurata")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "contents": _to_gemini_contents(messages),
+        "generationConfig": {
+            "temperature": CLOUDFLARE_TEXT_TEMPERATURE if temperature is None else temperature,
+            "maxOutputTokens": max_tokens or GEMINI_MAX_TOKENS,
+        },
+    }
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
+        await _gemini_limiter.acquire()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0)) as client:
+                r = await client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as e:
+            last_exc = e
+            logger.warning(f"Gemini: errore di rete (tentativo {attempt + 1}): {e}")
+            await asyncio.sleep(2)
+            continue
+
+        if r.status_code in (500, 502, 503, 504):
+            last_exc = RuntimeError(f"Gemini {r.status_code}: {r.text[:300]}")
+            logger.warning(f"Gemini: errore server {r.status_code} (tentativo {attempt + 1})")
+            await asyncio.sleep(3)
+            continue
+        if r.status_code >= 400:
+            # 429 / 400 / 401 / 403: inutile ritentare
+            raise RuntimeError(f"Gemini API error {r.status_code}: {r.text[:500]}")
+
+        data = r.json()
+        block = (data.get("promptFeedback") or {}).get("blockReason")
+        if block:
+            raise RuntimeError(f"Gemini ha bloccato la richiesta ({block})")
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise RuntimeError("Gemini ha restituito zero candidati")
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        # scarta eventuali parti di ragionamento ("thought": true)
+        text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+        if not text:
+            raise RuntimeError(f"Gemini ha restituito una risposta vuota (finishReason={candidates[0].get('finishReason')})")
+        return text
+
+    raise RuntimeError(f"Gemini non raggiungibile dopo {max_retries + 1} tentativi: {last_exc}")
+
+
+def _is_cloudflare_rate_limit(exc: Exception) -> bool:
+    """429 o quota giornaliera di Neuron esaurita (errore Cloudflare 4006)."""
+    s = str(exc).lower()
+    return ("error 429" in s or " 429" in s or "4006" in s
+            or "too many requests" in s or "daily free allocation" in s)
+
+
+async def _describe_images_in_messages(messages: List[dict]) -> List[dict]:
+    """
+    Fallback se Gemini fallisce su una richiesta con immagini: l'immagine dell'ultimo
+    messaggio utente viene descritta con Llama Vision (come faceva prima) e il testo
+    prosegue sul ramo Cloudflare. Le immagini della cronologia diventano segnaposto.
+    """
+    last_user = max((i for i, m in enumerate(messages) if m["role"] == "user"), default=-1)
+    out = []
+    for i, m in enumerate(messages):
+        c = m["content"]
+        if not isinstance(c, list):
+            out.append(m)
+            continue
+        new_parts = []
+        for p in c:
+            if p["type"] != "image_url":
+                new_parts.append(p)
+                continue
+            desc = ""
+            parsed = _parse_data_uri(p.get("image_url"))
+            if parsed and i == last_user:
+                try:
+                    desc = await describe_image_with_vision(parsed[1])
+                except Exception as e:
+                    logger.warning(f"Descrizione immagine di fallback fallita: {e}")
+            new_parts.append({"type": "text", "text": (
+                f"[Descrizione automatica dell'immagine]\n{desc}" if desc else "[Allegato immagine: non analizzabile]"
+            )})
+        out.append({**m, "content": new_parts})
+    return out
+
+
+async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: User, use_gemini: bool = False):
     try:
         if is_code:
             content, provider_label = await call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS)
+        elif use_gemini:
+            # Input con immagini: Gemma/Gemini vede l'immagine davvero.
+            try:
+                content = await call_gemini_text(messages)
+                provider_label = "gemini_gemma"
+            except Exception as gem_exc:
+                logger.warning(f"Gemini fallito su richiesta con immagini, ripiego su Llama Vision + Cloudflare: {gem_exc}")
+                fallback_messages = await _describe_images_in_messages(messages)
+                content = await call_cloudflare_text(fallback_messages)
+                provider_label = "cloudflare_workers_ai"
         else:
-            content = await call_cloudflare_text(messages)
-            provider_label = "cloudflare_workers_ai"
+            try:
+                content = await call_cloudflare_text(messages)
+                provider_label = "cloudflare_workers_ai"
+            except Exception as cf_exc:
+                if GEMINI_ENABLED and _is_cloudflare_rate_limit(cf_exc):
+                    logger.warning(f"Cloudflare in rate limit/quota, passo a Gemini: {cf_exc}")
+                    content = await call_gemini_text(messages)
+                    provider_label = "gemini_gemma"
+                else:
+                    raise
 
         used = await get_usage_today(user.user_id)
         job = _ai_jobs.get(job_id)
@@ -1493,17 +1741,26 @@ async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_cur
     """Avvia la generazione in background e risponde SUBITO con un job_id."""
     _cleanup_ai_jobs()
 
-    # Allegati prima di tutto (servono sia al router sia a build_messages)
-    await enrich_attachments_with_ai_analysis(body)
+    last_user_msg = next((m for m in reversed(body.messages) if m.role == "user"), None)
+    has_images = bool(last_user_msg and any(a.kind == "image" and a.b64 for a in last_user_msg.attachments))
+    gemini_vision = GEMINI_ENABLED and has_images
+
+    # Con Gemini le immagini NON vanno descritte da Llama: restano immagini vere.
+    await enrich_attachments_with_ai_analysis(body, skip_images=gemini_vision)
     await prepare_attachments(body)
 
     last_user_text = next((m.content for m in reversed(body.messages) if m.role == "user" and m.content), "")
 
-    # Ricerca web e classificazione codice in parallelo (prima erano in serie)
     search_context, is_code = await asyncio.gather(
         exa_web_search(last_user_text),
         is_code_request(body),
     )
+
+    # Richiesta di codice con immagine: il codice va su NVIDIA (solo testo), quindi
+    # l'immagine serve descritta come prima.
+    if gemini_vision and is_code:
+        gemini_vision = False
+        await enrich_attachments_with_ai_analysis(body)
 
     messages = build_messages(body, search_context)
 
@@ -1512,10 +1769,12 @@ async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_cur
         "status": "pending", "content": None, "error": None,
         "created_at": time.monotonic(), "user_id": user.user_id,
     }
-    task = asyncio.create_task(_run_ai_job(job_id, messages, is_code, user))
+    task = asyncio.create_task(_run_ai_job(job_id, messages, is_code, user, use_gemini=gemini_vision))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return {"job_id": job_id, "status": "pending"}
+
+
 
 
 @api_router.get("/ai/generate/status/{job_id}")
