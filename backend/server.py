@@ -76,7 +76,7 @@ CLOUDFLARE_IMAGE_MODEL = os.environ.get('CLOUDFLARE_IMAGE_MODEL', '@cf/black-for
 CLOUDFLARE_IMAGE_STEPS = int(os.environ.get('CLOUDFLARE_IMAGE_STEPS', '4'))
 NVIDIA_API_KEY = os.environ.get('NVIDIA_API_KEY')
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'deepseek-ai/deepseek-v4.1-flash')
+NVIDIA_CODE_MODEL = os.environ.get('NVIDIA_CODE_MODEL', 'nvidia/nemotron-3-ultra-550b-a55b')
 NVIDIA_CODE_MODEL_FALLBACK = os.environ.get('NVIDIA_CODE_MODEL_FALLBACK', 'nvidia/nemotron-3.5-super-vl-120b-a12b')
 NVIDIA_CODE_MAX_TOKENS = int(os.environ.get('NVIDIA_CODE_MAX_TOKENS', '65536'))
 
