@@ -8,6 +8,7 @@ import asyncio
 import logging
 import openai
 import pypdf
+import re
 from openai import AsyncOpenAI
 from pathlib import Path
 from datetime import datetime, timezone, timedelta, date
@@ -932,15 +933,103 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
     return body
 
 
+# =====================================================================================
+# ZALVION AI - FIX NVIDIA NIM (v2)
+#   1) stream bloccati / attese infinite / tentativi a catena  (timeout e deadline)
+#   2) risposte di codice TRONCATE: rilevamento finish_reason="length" + continuazione
+#      automatica, cosi' i siti grandi arrivano interi e la live preview funziona
+#
+# SOSTITUISCE in server.py queste 3 funzioni (cancella le vecchie per intero):
+#     call_nvidia_stream
+#     call_nvidia
+#     call_nvidia_code_with_fallback
+# e applica le 2 modifiche a _run_ai_job in fondo a questo file.
+# Tutto il resto (client, limiter, semaforo, _extra_body_for_model, Cloudflare,
+# Gemini) resta com'e'.
+#
+# Serve `import re` in cima a server.py (se non c'e' gia').
+#
+# VARIABILI D'AMBIENTE (tutte opzionali, hanno un default):
+#   NVIDIA_FIRST_BYTE_TIMEOUT   300   s per ricevere la risposta HTTP iniziale
+#   NVIDIA_IDLE_TIMEOUT         240   s massimi SENZA nessun chunk (reasoning incluso)
+#   NVIDIA_ATTEMPT_SECONDS      900   s massimi per UNA chiamata (15 min)
+#   NVIDIA_JOB_SECONDS          1650  s massimi per tutto il job di codice (27,5 min)
+#   NVIDIA_MAX_CONTINUATIONS    6     quante volte puo' "continuare" una risposta troncata
+#   NVIDIA_MIN_CONTINUE_SECONDS 60    sotto questo tempo residuo non parte una continuazione
+# Il job finisce SEMPRE prima dei 30 minuti del timeout lato frontend.
+# =====================================================================================
+
+NVIDIA_FIRST_BYTE_TIMEOUT = int(os.environ.get("NVIDIA_FIRST_BYTE_TIMEOUT", "300"))
+NVIDIA_IDLE_TIMEOUT = int(os.environ.get("NVIDIA_IDLE_TIMEOUT", "240"))
+NVIDIA_ATTEMPT_SECONDS = int(os.environ.get("NVIDIA_ATTEMPT_SECONDS", "900"))
+NVIDIA_JOB_SECONDS = int(os.environ.get("NVIDIA_JOB_SECONDS", "1650"))
+NVIDIA_MAX_CONTINUATIONS = int(os.environ.get("NVIDIA_MAX_CONTINUATIONS", "6"))
+NVIDIA_MIN_CONTINUE_SECONDS = int(os.environ.get("NVIDIA_MIN_CONTINUE_SECONDS", "60"))
+
+NVIDIA_CONTINUE_PROMPT = (
+    "Continua ESATTAMENTE dal punto in cui ti sei interrotto, anche a meta' di una riga o di una parola. "
+    "Non ripetere nulla di quanto hai gia' scritto, non salutare, non aggiungere introduzioni o commenti, "
+    "non riaprire il blocco di codice: scrivi solo il seguito."
+)
+NVIDIA_TRUNCATED_NOTE = "\n\n_La risposta è stata interrotta perché troppo lunga. Scrivi «continua» per proseguire._"
+
+# max_tokens massimo accettato da ogni modello, imparato dagli errori 400 (si azzera al riavvio)
+_NVIDIA_TOKEN_CAPS: dict = {}
+_FENCE_RE = re.compile(r"^[ \t]*```", re.M)
+
+
+class NvidiaStalledError(RuntimeError):
+    """Il modello non produce piu' nulla, o ha superato il tempo massimo del tentativo."""
+
+
+def _has_open_fence(text: str) -> bool:
+    """True se c'e' un blocco di codice ``` aperto e mai chiuso (risposta tagliata)."""
+    return len(_FENCE_RE.findall(text)) % 2 == 1
+
+
+def _parse_token_cap(exc: Exception, current: int) -> Optional[int]:
+    """Prova a leggere il tetto di max_tokens dal messaggio d'errore 400 di NVIDIA."""
+    nums = [int(n) for n in re.findall(r"\d{4,6}", str(exc))]
+    smaller = [n for n in nums if 2048 <= n < current]
+    return max(smaller) if smaller else None
+
+
+def _stitch_continuation(prev: str, more: str) -> str:
+    """Unisce il testo gia' scritto col seguito, togliendo ripetizioni e fence riaperti."""
+    # il modello a volte riapre il blocco di codice: ```html, ```js ...
+    if _has_open_fence(prev):
+        stripped = more.lstrip("\n")
+        if stripped.startswith("```"):
+            more = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+    # il modello a volte ripete le ultime righe: cerca la sovrapposizione piu' lunga
+    for k in range(min(400, len(prev), len(more)), 19, -1):
+        if prev.endswith(more[:k]):
+            more = more[k:]
+            break
+    return prev + more
+
+
 async def call_nvidia_stream(messages: List[dict], model: str, temperature: float = 0.7,
-                             max_tokens: int = 16384, thinking: bool = False):
+                             max_tokens: int = 16384, thinking: bool = False,
+                             max_seconds: Optional[int] = None, info: Optional[dict] = None):
     """
-    Stream verso NVIDIA (obbligatorio: il gateway chiude le richieste non-stream
-    dopo ~300s). Async generator che emette solo il testo visibile.
+    Stream verso NVIDIA (obbligatorio: il gateway chiude le richieste non-stream dopo
+    ~300s). Async generator che emette solo il testo visibile.
+
+    Protezioni contro le attese infinite:
+      1. la risposta HTTP iniziale deve arrivare entro NVIDIA_FIRST_BYTE_TIMEOUT
+      2. tra un chunk e il successivo (reasoning compreso) non passano piu' di
+         NVIDIA_IDLE_TIMEOUT secondi
+      3. un singolo tentativo non dura piu' di `max_seconds`
+    In tutti e tre i casi: NvidiaStalledError, stream chiuso, slot del semaforo liberato.
+
+    `info` (dict opzionale) viene riempito a fine stream con finish_reason,
+    content_chars e reasoning_chars: finish_reason == "length" = risposta TRONCATA.
     """
     client = _get_nvidia_client()
     openai_messages = _to_openai_messages(messages)
     concurrency = _concurrency_for_model(model)
+    max_seconds = max_seconds or NVIDIA_ATTEMPT_SECONDS
 
     async with concurrency:
         await nvidia_limiter.wait()
@@ -948,6 +1037,7 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
         reasoning_chars = 0
         content_chars = 0
         first_token_at = None
+        finish_reason = None
 
         extra_body = _extra_body_for_model(model, thinking)
         create_kwargs = dict(
@@ -957,85 +1047,174 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
         if extra_body:
             create_kwargs["extra_body"] = extra_body
 
-        logger.info(f"NVIDIA NIM: chiamata a '{model}' - max_tokens={max_tokens}, thinking={thinking}, stream=True")
-        response = await client.chat.completions.create(**create_kwargs)
+        logger.info(f"NVIDIA NIM: chiamata a '{model}' - max_tokens={max_tokens}, thinking={thinking}, "
+                    f"stream=True, limite tentativo {max_seconds}s")
+        try:
+            response = await asyncio.wait_for(
+                client.chat.completions.create(**create_kwargs),
+                timeout=min(NVIDIA_FIRST_BYTE_TIMEOUT, max_seconds),
+            )
+        except asyncio.TimeoutError:
+            raise NvidiaStalledError(
+                f"'{model}' non ha risposto entro {min(NVIDIA_FIRST_BYTE_TIMEOUT, max_seconds)}s "
+                f"(coda piena o gateway NVIDIA bloccato)"
+            )
         logger.info(f"NVIDIA NIM: risposta HTTP da '{model}' dopo {time.monotonic() - started:.1f}s")
 
-        async for chunk in response:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-            if reasoning:
-                reasoning_chars += len(reasoning)
-                continue
-            if delta.content:
-                if first_token_at is None:
-                    first_token_at = time.monotonic() - started
-                    logger.info(f"NVIDIA NIM: primo token da '{model}' dopo {first_token_at:.1f}s (reasoning: {reasoning_chars} car.)")
-                content_chars += len(delta.content)
-                yield delta.content
+        iterator = response.__aiter__()
+        last_heartbeat = time.monotonic()
+        try:
+            while True:
+                remaining = max_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise NvidiaStalledError(
+                        f"'{model}' ha superato il limite di {max_seconds}s "
+                        f"({content_chars} car. visibili, {reasoning_chars} di reasoning)"
+                    )
+                try:
+                    chunk = await asyncio.wait_for(iterator.__anext__(), timeout=min(NVIDIA_IDLE_TIMEOUT, remaining))
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    if remaining <= NVIDIA_IDLE_TIMEOUT:
+                        # e' scaduto il tempo massimo del tentativo, non il silenzio del modello
+                        raise NvidiaStalledError(
+                            f"'{model}' ha superato il limite di {max_seconds}s "
+                            f"({content_chars} car. visibili, {reasoning_chars} di reasoning)"
+                        )
+                    raise NvidiaStalledError(
+                        f"'{model}' non invia dati da piu' di {NVIDIA_IDLE_TIMEOUT}s "
+                        f"({content_chars} car. visibili, {reasoning_chars} di reasoning)"
+                    )
 
+                if time.monotonic() - last_heartbeat >= 60:
+                    last_heartbeat = time.monotonic()
+                    logger.info(f"NVIDIA NIM: '{model}' ancora in corso dopo {time.monotonic() - started:.0f}s "
+                                f"({content_chars} car. visibili, {reasoning_chars} di reasoning)")
+
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                fr = getattr(choice, "finish_reason", None)
+                if fr:
+                    finish_reason = fr
+                delta = choice.delta
+                reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                if reasoning:
+                    reasoning_chars += len(reasoning)
+                    continue
+                if delta.content:
+                    if first_token_at is None:
+                        first_token_at = time.monotonic() - started
+                        logger.info(f"NVIDIA NIM: primo token da '{model}' dopo {first_token_at:.1f}s "
+                                    f"(reasoning: {reasoning_chars} car.)")
+                    content_chars += len(delta.content)
+                    yield delta.content
+        finally:
+            try:
+                await response.close()
+            except Exception:
+                pass
+
+        if info is not None:
+            info.update(finish_reason=finish_reason, content_chars=content_chars, reasoning_chars=reasoning_chars)
         elapsed = time.monotonic() - started
         if content_chars == 0 and reasoning_chars > 0:
-            logger.warning(f"NVIDIA NIM: '{model}' ha esaurito max_tokens={max_tokens} in reasoning ({reasoning_chars} car.) - ZERO output visibile.")
-        logger.info(f"NVIDIA NIM: stream completato per '{model}' in {elapsed:.1f}s ({content_chars} car. visibili, {reasoning_chars} reasoning)")
-
-
-def _is_max_tokens_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return any(kw in msg for kw in ("max_tokens", "maximum context length", "max tokens", "too large", "exceeds"))
+            logger.warning(f"NVIDIA NIM: '{model}' ha esaurito max_tokens={max_tokens} in reasoning "
+                           f"({reasoning_chars} car.) - ZERO output visibile.")
+        if finish_reason == "length":
+            logger.warning(f"NVIDIA NIM: '{model}' TRONCATO da max_tokens={max_tokens} "
+                           f"({content_chars} car. visibili, {reasoning_chars} di reasoning)")
+        logger.info(f"NVIDIA NIM: stream completato per '{model}' in {elapsed:.1f}s "
+                    f"({content_chars} car. visibili, {reasoning_chars} reasoning, finish_reason={finish_reason})")
 
 
 async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7,
-                      max_tokens: int = 16384, thinking: bool = False, max_retries: int = 3) -> str:
-    """Wrapper: consuma call_nvidia_stream e restituisce il testo completo, con retry."""
+                      max_tokens: int = 16384, thinking: bool = False, max_retries: int = 3,
+                      deadline: Optional[float] = None, info: Optional[dict] = None) -> str:
+    """
+    Una chiamata completa (con retry) a NVIDIA: restituisce il testo di UNA risposta.
+    - `deadline` (istante time.monotonic()): non parte nessun tentativo oltre quel limite.
+    - Stallo (NvidiaStalledError): niente retry sullo stesso modello, tocca al fallback.
+    - Risposta vuota (token finiti nel reasoning): il tentativo dopo parte senza thinking.
+    - Errore 400 su max_tokens: legge il tetto dal messaggio (o dimezza), NON conta come
+      tentativo, e ricorda il tetto del modello per le richieste successive.
+    - `info` riceve finish_reason ecc. (vedi call_nvidia_stream).
+    """
     if not NVIDIA_API_KEY:
         logger.error(f"NVIDIA NIM: richiesta bloccata - chiave assente (model={model})")
         raise RuntimeError("NVIDIA_API_KEY non configurata")
 
-    current_max_tokens = max_tokens
+    current_max_tokens = min(max_tokens, _NVIDIA_TOKEN_CAPS.get(model, max_tokens))
+    current_thinking = thinking
+    downshifted = False
+    downshifts = 0
     last_exc: Optional[Exception] = None
-    for attempt in range(max_retries):
-        logger.info(f"NVIDIA NIM: richiesta a '{model}' (tentativo {attempt + 1}/{max_retries}, thinking={thinking}, max_tokens={current_max_tokens})")
+    attempt = 0
+    while attempt < max_retries:
+        attempt += 1
+        attempt_seconds = NVIDIA_ATTEMPT_SECONDS
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining < 30:
+                logger.warning(f"NVIDIA NIM: tempo massimo esaurito per '{model}', nessun altro tentativo")
+                break
+            attempt_seconds = min(NVIDIA_ATTEMPT_SECONDS, int(remaining))
+
+        logger.info(f"NVIDIA NIM: richiesta a '{model}' (tentativo {attempt}/{max_retries}, "
+                    f"thinking={current_thinking}, max_tokens={current_max_tokens}, limite {attempt_seconds}s)")
         try:
+            attempt_info: dict = {}
             chunks = []
-            async for piece in call_nvidia_stream(messages, model, temperature, current_max_tokens, thinking):
+            async for piece in call_nvidia_stream(messages, model, temperature, current_max_tokens,
+                                                  current_thinking, max_seconds=attempt_seconds,
+                                                  info=attempt_info):
                 chunks.append(piece)
             text = "".join(chunks)
             if not text.strip():
                 raise RuntimeError(f"NVIDIA NIM '{model}' ha restituito una risposta vuota")
+            if downshifted:
+                _NVIDIA_TOKEN_CAPS[model] = current_max_tokens
+                logger.info(f"NVIDIA NIM: tetto max_tokens di '{model}' = {current_max_tokens} (memorizzato)")
+            if info is not None:
+                info.update(attempt_info)
             return text
+        except NvidiaStalledError as e:
+            logger.warning(f"NVIDIA NIM: stallo su '{model}', niente altri tentativi sullo stesso modello: {e}")
+            raise
         except openai.AuthenticationError as e:
             logger.error(f"NVIDIA NIM: 401 - chiave sbagliata o revocata (model={model}): {e}")
             raise RuntimeError(f"NVIDIA API key non valida o revocata: {e}") from e
         except openai.BadRequestError as e:
-            if _is_max_tokens_error(e) and current_max_tokens > 2048:
-                new_max = current_max_tokens // 2
+            if _is_max_tokens_error(e) and current_max_tokens > 2048 and downshifts < 6:
+                new_max = _parse_token_cap(e, current_max_tokens) or max(current_max_tokens // 2, 2048)
                 logger.warning(f"NVIDIA NIM: max_tokens={current_max_tokens} rifiutato da '{model}' (400), riprovo con {new_max}")
                 current_max_tokens = new_max
+                downshifted = True
+                downshifts += 1
+                attempt -= 1          # non conta come tentativo
                 last_exc = e
                 continue
             logger.error(f"NVIDIA NIM: 400 (model={model}): {e}")
             raise RuntimeError(f"NVIDIA API richiesta non valida: {e}") from e
         except openai.RateLimitError as e:
             last_exc = e
-            if attempt < max_retries - 1:
-                wait_s = min(2 ** attempt * 2, 20)
-                logger.warning(f"NVIDIA NIM 429 (model={model}), attesa {wait_s}s (tentativo {attempt + 1}/{max_retries})")
+            if attempt < max_retries:
+                wait_s = min(2 ** (attempt - 1) * 2, 20)
+                logger.warning(f"NVIDIA NIM 429 (model={model}), attesa {wait_s}s (tentativo {attempt}/{max_retries})")
                 await asyncio.sleep(wait_s)
                 continue
             break
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             last_exc = e
-            if attempt < max_retries - 1:
+            if attempt < max_retries:
                 logger.warning(f"NVIDIA NIM: connessione/timeout (model={model}), riprovo: {e}")
                 await asyncio.sleep(2)
                 continue
             break
         except openai.InternalServerError as e:
             last_exc = e
-            if attempt < max_retries - 1:
+            if attempt < max_retries:
                 logger.warning(f"NVIDIA NIM: errore 5xx (model={model}), riprovo: {e}")
                 await asyncio.sleep(3)
                 continue
@@ -1045,33 +1224,117 @@ async def call_nvidia(messages: List[dict], model: str, temperature: float = 0.7
             last_exc = e
             break
         except RuntimeError as e:
-            # risposta vuota: ritenta
+            # risposta vuota: riprova, ma senza thinking (i token erano finiti nel reasoning)
             last_exc = e
-            if attempt < max_retries - 1:
+            if current_thinking:
+                current_thinking = False
+                logger.warning(f"NVIDIA NIM: risposta vuota da '{model}', il prossimo tentativo parte SENZA thinking")
+            if attempt < max_retries:
                 continue
             break
 
     raise RuntimeError(f"NVIDIA NIM (model={model}) non raggiungibile dopo {max_retries} tentativi: {last_exc}")
 
 
+async def call_nvidia_continued(messages: List[dict], model: str, temperature: float = 1.0,
+                                max_tokens: int = 16384, thinking: bool = True,
+                                deadline: Optional[float] = None) -> str:
+    """
+    Come call_nvidia, ma se la risposta viene TRONCATA (finish_reason == "length") chiede
+    al modello di continuare, fino a NVIDIA_MAX_CONTINUATIONS volte, e cuce i pezzi.
+    - le continuazioni partono SENZA thinking, cosi' i token vanno tutti al codice;
+    - se una continuazione fallisce o il tempo finisce, si restituisce quanto scritto
+      finora (meglio un sito quasi completo di un errore);
+    - un blocco ``` rimasto aperto viene chiuso, cosi' la live preview riesce a leggerlo;
+    - se alla fine e' ancora troncata, si aggiunge NVIDIA_TRUNCATED_NOTE.
+    """
+    info: dict = {}
+    text = await call_nvidia(messages, model, temperature, max_tokens, thinking,
+                             deadline=deadline, info=info)
+    rounds = 0
+    errored = False
+    while info.get("finish_reason") == "length" and rounds < NVIDIA_MAX_CONTINUATIONS:
+        if deadline is not None and deadline - time.monotonic() < NVIDIA_MIN_CONTINUE_SECONDS:
+            logger.warning(f"NVIDIA NIM: '{model}' troncato e tempo quasi finito, mi fermo a {len(text)} caratteri")
+            break
+        rounds += 1
+        logger.info(f"NVIDIA NIM: '{model}' troncato (length), continuazione {rounds}/{NVIDIA_MAX_CONTINUATIONS} "
+                    f"- {len(text)} caratteri finora")
+        cont_messages = list(messages) + [
+            {"role": "assistant", "content": text},
+            {"role": "user", "content": NVIDIA_CONTINUE_PROMPT},
+        ]
+        info = {}
+        try:
+            more = await call_nvidia(cont_messages, model, temperature, max_tokens, thinking=False,
+                                     max_retries=2, deadline=deadline, info=info)
+        except Exception as e:
+            logger.warning(f"NVIDIA NIM: continuazione {rounds} fallita ({e}), restituisco i {len(text)} caratteri gia' scritti")
+            errored = True
+            break
+        text = _stitch_continuation(text, more)
+
+    truncated = errored or info.get("finish_reason") == "length"
+    if truncated:
+        if _has_open_fence(text):
+            text += "\n```"
+        text += NVIDIA_TRUNCATED_NOTE
+        logger.warning(f"NVIDIA NIM: risposta di '{model}' ancora incompleta dopo {rounds} continuazioni ({len(text)} caratteri)")
+    elif rounds:
+        logger.info(f"NVIDIA NIM: risposta di '{model}' completata con {rounds} continuazioni ({len(text)} caratteri)")
+    return text
+
+
 async def call_nvidia_code_with_fallback(messages: List[dict], max_tokens: int) -> tuple:
-    """Prova NVIDIA_CODE_MODEL; se fallisce del tutto, ritenta su NVIDIA_CODE_MODEL_FALLBACK."""
+    """
+    Prova NVIDIA_CODE_MODEL con al massimo l'80% del tempo totale (NVIDIA_JOB_SECONDS);
+    se fallisce o si blocca prima di scrivere qualcosa, passa a NVIDIA_CODE_MODEL_FALLBACK
+    con il tempo che resta. In totale non supera mai NVIDIA_JOB_SECONDS.
+    """
+    started = time.monotonic()
+    job_deadline = started + NVIDIA_JOB_SECONDS
+    primary_deadline = started + NVIDIA_JOB_SECONDS * 0.8
     try:
-        content = await call_nvidia(
+        content = await call_nvidia_continued(
             messages, model=NVIDIA_CODE_MODEL, temperature=1.0,
-            max_tokens=max_tokens, thinking=True,
+            max_tokens=max_tokens, thinking=True, deadline=primary_deadline,
         )
         return content, NVIDIA_CODE_MODEL
     except Exception as primary_exc:
         logger.warning(
-            f"NVIDIA NIM: modello primario '{NVIDIA_CODE_MODEL}' fallito, "
+            f"NVIDIA NIM: modello primario '{NVIDIA_CODE_MODEL}' fallito dopo {time.monotonic() - started:.0f}s, "
             f"passo al fallback '{NVIDIA_CODE_MODEL_FALLBACK}': {primary_exc}"
         )
-        content = await call_nvidia(
+        content = await call_nvidia_continued(
             messages, model=NVIDIA_CODE_MODEL_FALLBACK, temperature=1.0,
-            max_tokens=max_tokens, thinking=True,
+            max_tokens=max_tokens, thinking=True, deadline=job_deadline,
         )
         return content, NVIDIA_CODE_MODEL_FALLBACK
+
+
+# =====================================================================================
+# MODIFICHE A _run_ai_job (2 punti)
+# =====================================================================================
+# 1) nel ramo `if is_code:` sostituisci la chiamata con:
+#
+#        if is_code:
+#            content, provider_label = await asyncio.wait_for(
+#                call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS),
+#                timeout=NVIDIA_JOB_SECONDS + 120,   # rete di sicurezza, include l'attesa in coda
+#            )
+#
+# 2) nel blocco `except Exception as e:` in fondo, sostituisci le righe dell'errore con:
+#
+#        except Exception as e:
+#            logger.error(f"AI job error (job {job_id}): {e}")
+#            job = _ai_jobs.get(job_id)
+#            if job is not None:
+#                if isinstance(e, (NvidiaStalledError, asyncio.TimeoutError)):
+#                    msg = "Il modello ha impiegato troppo tempo a rispondere. Riprova tra poco."
+#                else:
+#                    msg = "Error generating with Zalvion AI"
+#                _ai_jobs[job_id] = {**job, "status": "error", "error": msg}
+# =====================================================================================
 
 
 # =====================================================================================
@@ -1695,7 +1958,10 @@ async def _describe_images_in_messages(messages: List[dict]) -> List[dict]:
 async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: User, use_gemini: bool = False):
     try:
         if is_code:
-            content, provider_label = await call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS)
+          content, provider_label = await asyncio.wait_for(
+             call_nvidia_code_with_fallback(messages, max_tokens=NVIDIA_CODE_MAX_TOKENS),
+             timeout=NVIDIA_JOB_SECONDS + 120,
+         )
         elif use_gemini:
             # Input con immagini: Gemma/Gemini vede l'immagine davvero.
             try:
@@ -1731,12 +1997,15 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
             "usage_used": used,
             "usage_limit": daily_limit_for(user.plan),
         }
-    except Exception as e:
-        logger.error(f"AI job error (job {job_id}): {e}")
-        job = _ai_jobs.get(job_id)
-        if job is not None:
-            _ai_jobs[job_id] = {**job, "status": "error", "error": "Error generating with Zalvion AI"}
-
+        except Exception as e:
+         logger.error(f"AI job error (job {job_id}): {e}")
+         job = _ai_jobs.get(job_id)
+         if job is not None:
+             if isinstance(e, (NvidiaStalledError, asyncio.TimeoutError)):
+                 msg = "Il modello ha impiegato troppo tempo a rispondere. Riprova tra poco."
+             else:
+                 msg = "Error generating with Zalvion AI"
+             _ai_jobs[job_id] = {**job, "status": "error", "error": msg}
 
 @api_router.post("/ai/generate/start")
 async def ai_generate_start(body: ChatGenerateBody, user: User = Depends(get_current_user)):
