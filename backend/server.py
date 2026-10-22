@@ -1102,7 +1102,7 @@ async def call_nvidia_stream(messages: List[dict], model: str, temperature: floa
                 reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                 if reasoning:
                     reasoning_chars += len(reasoning)
-                    continue
+                    
                 if delta.content:
                     if first_token_at is None:
                         first_token_at = time.monotonic() - started
