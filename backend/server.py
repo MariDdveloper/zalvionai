@@ -960,9 +960,9 @@ def _extra_body_for_model(model: str, thinking: bool) -> dict:
 # =====================================================================================
 
 NVIDIA_FIRST_BYTE_TIMEOUT = int(os.environ.get("NVIDIA_FIRST_BYTE_TIMEOUT", "300"))
-NVIDIA_IDLE_TIMEOUT = int(os.environ.get("NVIDIA_IDLE_TIMEOUT", "240"))
-NVIDIA_ATTEMPT_SECONDS = int(os.environ.get("NVIDIA_ATTEMPT_SECONDS", "900"))
-NVIDIA_JOB_SECONDS = int(os.environ.get("NVIDIA_JOB_SECONDS", "1650"))
+NVIDIA_IDLE_TIMEOUT = int(os.environ.get("NVIDIA_IDLE_TIMEOUT", "300"))
+NVIDIA_ATTEMPT_SECONDS = int(os.environ.get("NVIDIA_ATTEMPT_SECONDS", "3600"))
+NVIDIA_JOB_SECONDS = int(os.environ.get("NVIDIA_JOB_SECONDS", "3600"))
 NVIDIA_MAX_CONTINUATIONS = int(os.environ.get("NVIDIA_MAX_CONTINUATIONS", "6"))
 NVIDIA_MIN_CONTINUE_SECONDS = int(os.environ.get("NVIDIA_MIN_CONTINUE_SECONDS", "60"))
 
