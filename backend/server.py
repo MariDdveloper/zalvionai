@@ -1964,8 +1964,8 @@ async def _describe_images_in_messages(messages: List[dict]) -> List[dict]:
 #   NEMOTRON_TEXT_THINKING       opzionale, "1" per attivare il thinking (default "0": piu' veloce)
 #   NEMOTRON_TEXT_TOTAL_SECONDS  opzionale, default 180
 # =====================================================================================
-NEMOTRON_API_KEY = os.environ.get("NEMOTRON_API_KEY", "").strip()
-NEMOTRON_TEXT_MODEL = os.environ.get("NEMOTRON_TEXT_MODEL", "nvidia/nemotron-3-super-120b-a12b").strip()
+NEMOTRON_API_KEY = os.environ.get("NEMOTRON_API_KEY").strip()
+NEMOTRON_TEXT_MODEL = os.environ.get("NEMOTRON_TEXT_MODEL", "nvidia/nemotron-3.5-super-vl-120b-a12b").strip()
 NEMOTRON_TEXT_MAX_TOKENS = int(os.environ.get("NEMOTRON_TEXT_MAX_TOKENS", "8192"))
 NEMOTRON_TEXT_TEMPERATURE = float(os.environ.get("NEMOTRON_TEXT_TEMPERATURE", "0.7"))
 NEMOTRON_TEXT_THINKING = os.environ.get("NEMOTRON_TEXT_THINKING", "0").strip() == "1"
