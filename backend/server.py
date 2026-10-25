@@ -1953,6 +1953,89 @@ async def _describe_images_in_messages(messages: List[dict]) -> List[dict]:
             )})
         out.append({**m, "content": new_parts})
     return out
+# =====================================================================================
+# NEMOTRON SUPER 120B (NVIDIA NIM, 2° account) - MODELLO PRIMARIO PER IL TESTO
+# Catena testo: Nemotron -> (qualsiasi errore, 429 incluso) Cloudflare -> (429) Gemini
+# VARIABILI D'AMBIENTE (Render):
+#   NEMOTRON_API_KEY             chiave del SECONDO account NVIDIA NIM (se assente: si salta Nemotron)
+#   NEMOTRON_TEXT_MODEL          opzionale, default nvidia/nemotron-3-super-120b-a12b
+#   NEMOTRON_TEXT_MAX_TOKENS     opzionale, default 8192
+#   NEMOTRON_TEXT_TEMPERATURE    opzionale, default 0.7
+#   NEMOTRON_TEXT_THINKING       opzionale, "1" per attivare il thinking (default "0": piu' veloce)
+#   NEMOTRON_TEXT_TOTAL_SECONDS  opzionale, default 180
+# =====================================================================================
+NEMOTRON_API_KEY = os.environ.get("NEMOTRON_API_KEY", "").strip()
+NEMOTRON_TEXT_MODEL = os.environ.get("NEMOTRON_TEXT_MODEL", "nvidia/nemotron-3-super-120b-a12b").strip()
+NEMOTRON_TEXT_MAX_TOKENS = int(os.environ.get("NEMOTRON_TEXT_MAX_TOKENS", "8192"))
+NEMOTRON_TEXT_TEMPERATURE = float(os.environ.get("NEMOTRON_TEXT_TEMPERATURE", "0.7"))
+NEMOTRON_TEXT_THINKING = os.environ.get("NEMOTRON_TEXT_THINKING", "0").strip() == "1"
+NEMOTRON_TEXT_TOTAL_SECONDS = int(os.environ.get("NEMOTRON_TEXT_TOTAL_SECONDS", "180"))
+NEMOTRON_ENABLED = bool(NEMOTRON_API_KEY)
+
+if NEMOTRON_ENABLED:
+    logger.info(f"Nemotron testo attivo: modello '{NEMOTRON_TEXT_MODEL}' (thinking={NEMOTRON_TEXT_THINKING})")
+else:
+    logger.warning("NEMOTRON_API_KEY non configurata: il testo parte direttamente da Cloudflare.")
+
+_nemotron_client: Optional[AsyncOpenAI] = None
+
+
+def _get_nemotron_client() -> AsyncOpenAI:
+    global _nemotron_client
+    if _nemotron_client is None:
+        _nemotron_client = AsyncOpenAI(
+            base_url=NVIDIA_BASE_URL, api_key=NEMOTRON_API_KEY, max_retries=0,
+            timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=30.0),
+        )
+    return _nemotron_client
+
+
+async def call_nemotron_text(messages: List[dict], temperature: float = NEMOTRON_TEXT_TEMPERATURE,
+                             max_tokens: int = NEMOTRON_TEXT_MAX_TOKENS) -> str:
+    """Testo con Nemotron Super 120B su NVIDIA NIM (stream interno, restituisce il testo intero)."""
+    if not NEMOTRON_ENABLED:
+        raise RuntimeError("NEMOTRON_API_KEY non configurata")
+    client = _get_nemotron_client()
+    openai_messages = _to_openai_messages(messages)
+
+    async def _run() -> str:
+        response = await client.chat.completions.create(
+            model=NEMOTRON_TEXT_MODEL, messages=openai_messages, temperature=temperature,
+            top_p=0.95, max_tokens=max_tokens, stream=True,
+            extra_body={"chat_template_kwargs": {"enable_thinking": NEMOTRON_TEXT_THINKING}},
+        )
+        chunks = []
+        try:
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                # il reasoning_content viene ignorato: non deve mai finire nel testo mostrato
+                if delta and delta.content:
+                    chunks.append(delta.content)
+        finally:
+            try:
+                await response.close()
+            except Exception:
+                pass
+        return "".join(chunks).strip()
+
+    text = await asyncio.wait_for(_run(), timeout=NEMOTRON_TEXT_TOTAL_SECONDS)
+    if not text:
+        raise RuntimeError("Nemotron ha restituito una risposta vuota")
+    return text
+
+
+async def call_text_with_nemotron(messages: List[dict]) -> tuple:
+    """Nemotron primario; se fallisce (429 o altro) ripiega su Cloudflare. Restituisce (testo, provider)."""
+    if NEMOTRON_ENABLED:
+        try:
+            return await call_nemotron_text(messages), "nvidia_nemotron_super"
+        except openai.RateLimitError as e:
+            logger.warning(f"Nemotron in 429, passo a Cloudflare: {e}")
+        except Exception as e:
+            logger.warning(f"Nemotron fallito ({type(e).__name__}: {e}), passo a Cloudflare")
+    return await call_cloudflare_text(messages), "cloudflare_workers_ai"
 
 
 async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: User, use_gemini: bool = False):
@@ -1970,12 +2053,11 @@ async def _run_ai_job(job_id: str, messages: List[dict], is_code: bool, user: Us
             except Exception as gem_exc:
                 logger.warning(f"Gemini fallito su richiesta con immagini, ripiego su Llama Vision + Cloudflare: {gem_exc}")
                 fallback_messages = await _describe_images_in_messages(messages)
-                content = await call_cloudflare_text(fallback_messages)
+                content = await call_cloudflare_text(messages)
                 provider_label = "cloudflare_workers_ai"
         else:
             try:
-                content = await call_cloudflare_text(messages)
-                provider_label = "cloudflare_workers_ai"
+                content, provider_label = await call_text_with_nemotron(messages)
             except Exception as cf_exc:
                 if GEMINI_ENABLED and _is_cloudflare_rate_limit(cf_exc):
                     logger.warning(f"Cloudflare in rate limit/quota, passo a Gemini: {cf_exc}")
