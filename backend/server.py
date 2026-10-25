@@ -2190,7 +2190,57 @@ async def test_nvidia():
         "results": results,
     }
 
+# =====================================================================================
+# IMMAGINI: FALLBACK POLLINATIONS AI (solo se Cloudflare Flux fallisce)
+# VARIABILI D'AMBIENTE (tutte opzionali):
+#   POLLINATIONS_MODEL    default "flux"
+#   POLLINATIONS_TIMEOUT  default 90 (secondi per tentativo)
+# =====================================================================================
+POLLINATIONS_MODEL = os.environ.get("POLLINATIONS_MODEL", "flux").strip()
+POLLINATIONS_TIMEOUT = float(os.environ.get("POLLINATIONS_TIMEOUT", "90"))
 
+
+async def call_pollinations_image(prompt: str, max_retries: int = 3):
+    """Genera l'immagine da Pollinations lato server. Restituisce (bytes, content_type)."""
+    from urllib.parse import quote
+    clean = (prompt or "").strip()[:900] or "a beautiful high quality image"
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_retries):
+        url = (
+            f"https://image.pollinations.ai/prompt/{quote(clean, safe='')}"
+            f"?width=1024&height=1024&seed={random.randint(1, 2_000_000_000)}"
+            f"&model={POLLINATIONS_MODEL}&nologo=true&referrer=zalvionai.com"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(POLLINATIONS_TIMEOUT, connect=15.0),
+                                         follow_redirects=True) as client:
+                r = await client.get(url)
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                await asyncio.sleep(4 * (attempt + 1))
+                continue
+            if r.status_code >= 400:
+                raise RuntimeError(f"Pollinations {r.status_code}: {r.text[:300]}")
+            content_type = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if not content_type.startswith("image/") or not r.content:
+                raise RuntimeError(f"Pollinations ha risposto con contenuto non valido ({content_type or 'sconosciuto'})")
+            return r.content, content_type
+        except httpx.RequestError as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                await asyncio.sleep(4 * (attempt + 1))
+        except RuntimeError as e:
+            last_exc = e
+            break
+    raise RuntimeError(f"Pollinations non raggiungibile dopo {max_retries} tentativi: {last_exc}")
+
+
+async def call_image_with_fallback(prompt: str):
+    """Cloudflare Flux primario; se fallisce (429 o altro) ripiega su Pollinations."""
+    try:
+        return await call_cloudflare_flux_image(prompt)
+    except Exception as cf_exc:
+        logger.warning(f"Cloudflare Flux fallito, passo a Pollinations AI: {cf_exc}")
+        return await call_pollinations_image(prompt)
 @api_router.post("/ai/generate-image")
 async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_current_user)):
     """
@@ -2201,7 +2251,7 @@ async def ai_generate_image(body: ImageGenerateBody, user: User = Depends(get_cu
         raise HTTPException(status_code=400, detail="Questo tipo di immagine non può essere generata.")
     await enforce_and_increment(user)
     try:
-        content, content_type = await call_cloudflare_flux_image(body.prompt)
+        content, content_type = await call_image_with_fallback(body.prompt)
     except Exception as e:
         logger.error(f"Cloudflare Workers AI (Flux) image error: {e}")
         lang = "it"
@@ -2219,7 +2269,7 @@ async def ai_generate_image_pollinations(body: PollinationsImageBody, user: User
         raise HTTPException(status_code=400, detail="This type of image cannot be generated.")
     prompt_text = (body.prompt or "").strip() or "a beautiful high quality image"
     try:
-        content, content_type = await call_cloudflare_flux_image(prompt_text)
+        content, content_type = await call_image_with_fallback(prompt_text)
     except Exception as e:
         logger.error(f"Cloudflare Flux image error: {e}")
         raise HTTPException(status_code=502, detail=image_quota_message("en"))
