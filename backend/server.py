@@ -1659,7 +1659,30 @@ async def is_code_request(body: ChatGenerateBody) -> bool:
         logger.warning(f"Classificazione is_code_request fallita, uso default False (ramo testo): {e}")
         return False
 
-
+MATH_FORMAT_RULES = r"""
+MATH FORMATTING (mandatory, applies to every answer):
+- Write ALL mathematical content in LaTeX. Inline formulas go between single dollar signs: $x^2 + 1$. Standalone, large or multi-line formulas go between double dollar signs on their own lines:
+$$
+\int_0^1 x^2 \, dx = \frac{1}{3}
+$$
+- Never use \( ... \) or \[ ... \]. Never put formulas in backticks or code blocks. Never write math as plain text or ASCII (no "int x dx", "sqrt(x)", "pi", "x^2" or "a/b" outside dollar signs). Never use Unicode math symbols inside formulas: use the LaTeX command instead.
+- Every single symbol is math, even a lone one in a sentence: write $\pi$, $\infty$, $\theta$, $\leq$, $\in$, $\mathbb{R}$, $45^\circ$, $\%$ is plain text.
+- Use these LaTeX commands:
+  Greek lowercase: \alpha \beta \gamma \delta \epsilon \varepsilon \zeta \eta \theta \vartheta \iota \kappa \lambda \mu \nu \xi \pi \rho \sigma \tau \upsilon \phi \varphi \chi \psi \omega
+  Greek uppercase: \Gamma \Delta \Theta \Lambda \Xi \Pi \Sigma \Upsilon \Phi \Psi \Omega
+  Operations: \pm \mp \times \div \cdot \ast \star \circ \oplus \otimes \sqrt{x} \sqrt[n]{x} \frac{a}{b} \dfrac{a}{b} \binom{n}{k} |x| \lfloor x \rfloor \lceil x \rceil \left( ... \right) \left[ ... \right] \left\{ ... \right\} \langle x, y \rangle \| x \|
+  Relations: \leq \geq \neq \approx \sim \simeq \cong \equiv \propto \ll \gg \prec \succ \perp \parallel \mid
+  Sets and logic: \in \notin \subset \subseteq \supset \supseteq \cup \cap \setminus \emptyset \varnothing \mathbb{N} \mathbb{Z} \mathbb{Q} \mathbb{R} \mathbb{C} \forall \exists \nexists \neg \land \lor \implies \iff \therefore \because \Rightarrow \Leftrightarrow
+  Arrows: \to \rightarrow \leftarrow \leftrightarrow \Rightarrow \Leftarrow \mapsto \uparrow \downarrow \longrightarrow \rightleftharpoons
+  Calculus and analysis: \int \iint \iiint \oint \sum_{i=1}^{n} \prod_{i=1}^{n} \lim_{x \to 0} \partial \nabla \infty \frac{dy}{dx} \frac{\partial f}{\partial x} f'(x) f''(x) \sin \cos \tan \cot \sec \csc \arcsin \arccos \arctan \sinh \cosh \tanh \ln \log \exp \max \min \sup \inf \det \dim \ker \gcd \arg \deg \bmod
+  Accents and decorations: \hat{x} \bar{x} \vec{v} \dot{x} \ddot{x} \tilde{x} \overline{AB} \underline{x} \overrightarrow{AB} \overbrace{...}^{...} \underbrace{...}_{...}
+  Dots, geometry, misc: \ldots \cdots \vdots \ddots \angle \triangle \square \degree 90^\circ \prime \hbar \ell \Re \Im \aleph \dagger
+  Fonts: \mathbb{R} \mathbf{v} \mathcal{L} \mathrm{d} \mathit{x} \text{words inside formulas}
+  Units and text inside formulas: \text{m/s}, 5\,\text{kg}, 10\ \text{cm}
+- Matrices: \begin{pmatrix} a & b \\ c & d \end{pmatrix} (also bmatrix, vmatrix, Bmatrix). Piecewise functions and systems: \begin{cases} ... \\ ... \end{cases}. Multi-line derivations: always wrap in $$ and use \begin{aligned} a &= b \\ &= c \end{aligned}. Never use bare \begin{align} or \begin{equation}.
+- To write a literal dollar sign (currency) use \$ in plain text.
+- Keep explanations in normal text and only the math in LaTeX. Make sure every opening $ or $$ has its closing one.
+"""
 def build_messages(body: ChatGenerateBody, search_context: str = "") -> List[dict]:
     lang_name = LANG_NAMES.get(body.language, "English")
     reminder = LANG_REMINDERS.get(body.language, f"Reply exclusively in {lang_name}.")
@@ -1701,7 +1724,7 @@ def build_messages(body: ChatGenerateBody, search_context: str = "") -> List[dic
         )
 
     # Istruzioni come scambio "finto" a inizio conversazione: user -> assistant
-    sys_content = SYSTEM_PROMPT.format(lang=lang_name)
+    sys_content = SYSTEM_PROMPT.format(lang=lang_name) + "\n\n" + MATH_FORMAT_RULES
     ack = LANG_ACKS.get(body.language, "OK.")
     priming = [
         {"role": "user", "content": f"{sys_content}\n\n{reminder}"},
