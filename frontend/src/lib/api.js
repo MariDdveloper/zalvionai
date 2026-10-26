@@ -133,3 +133,18 @@ function streamSSE(url, payload, { onDelta, onImage, onDone, onError }) {
   })();
   return controller;
 }
+
+// Normalizza le formule: \( \) e \[ \] diventano $ $ e $$ $$.
+// Salta blocchi di codice, codice inline e artifact, così non li rovina.
+export function normalizeMath(text) {
+  if (!text) return text;
+  return text
+    .split(/(```[\s\S]*?```|`[^`\n]+`|<claus-artifact[\s\S]*?<\/claus-artifact>)/g)
+    .map((part, i) => {
+      if (i % 2 === 1) return part;
+      return part
+        .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `\n$$\n${m.trim()}\n$$\n`)
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m.trim()}$`);
+    })
+    .join("");
+}
