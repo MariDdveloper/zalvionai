@@ -5,6 +5,10 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { Copy, Check, FileText, Image as ImageIcon, RefreshCw, Code2, Loader2, ArrowRight, Volume2 } from "lucide-react";
 import { parseMessage, TOKEN_SPLIT_RE } from "../lib/artifacts";
+import { normalizeMath } from "../lib/api"; // adatta il percorso se serve
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 
 
 function ArtifactCard({ artifact, onOpen }) {
@@ -101,8 +105,13 @@ function MessageItem({ message, isStreaming, canRegenerate, onRegenerate, onOpen
                     }
                     if (!seg.trim()) return null;
                     return (
-                      <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>
-                        {seg}
+                      <ReactMarkdown
+                        key={i}
+                        remarkPlugins={[remarkGfm, remarkMath]}
+                        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
+                        components={{ code: CodeBlock }}
+                      >
+                        {normalizeMath(seg)}
                       </ReactMarkdown>
                     );
                   })}
